@@ -1,0 +1,18 @@
+[project]
+name = "sefir-ingestion"
+version = "0.1.0"
+description = "Sefir ingestion job: extracts catalogue fields from screenshots."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "Ömer Kızılkaya" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+sefir-ingestion = "sefir_ingestion:main"
+
+[build-system]
+requires = ["uv_build>=0.11.17,<0.12.0"]
+build-backend = "uv_build"

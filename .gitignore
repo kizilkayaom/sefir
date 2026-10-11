@@ -8,3 +8,4 @@ credentials*.json
 token*.json
 .DS_Store
 mcp/bin/
+docs/

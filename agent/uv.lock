@@ -1,0 +1,19 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[manifest]
+members = [
+    "sefir-agent",
+    "sefir-ingestion",
+]
+
+[[package]]
+name = "sefir-agent"
+version = "0.1.0"
+source = { editable = "worker" }
+
+[[package]]
+name = "sefir-ingestion"
+version = "0.1.0"
+source = { editable = "ingestion" }

@@ -1,0 +1,18 @@
+[project]
+name = "sefir-agent"
+version = "0.1.0"
+description = "Sefir agent worker: drafts outreach emails and runs the approval workflow."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "Ömer Kızılkaya" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+sefir-agent = "sefir_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.11.17,<0.12.0"]
+build-backend = "uv_build"
