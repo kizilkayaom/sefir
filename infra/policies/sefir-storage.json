@@ -1,0 +1,24 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:CreateBucket",
+                "s3:DeleteBucket",
+                "s3:ListBucket",
+                "s3:GetBucket*",
+                "s3:GetAccelerateConfiguration",
+                "s3:GetEncryptionConfiguration",
+                "s3:GetLifecycleConfiguration",
+                "s3:GetReplicationConfiguration",
+                "s3:TagResource",
+                "s3:UntagResource",
+                "s3:ListTagsForResource",
+                "s3:PutBucketTagging",
+                "s3:PutBucketPublicAccessBlock"
+            ],
+            "Resource": "arn:aws:s3:::sefir-screenshots-*"
+        }
+    ]
+}
