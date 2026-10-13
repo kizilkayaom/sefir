@@ -17,3 +17,23 @@ jobs:
         run: terraform -chdir=infra init -backend=false -input=false
       - name: Validate Terraform configuration
         run: terraform -chdir=infra validate -no-color
+
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: mcp/go.mod
+          cache-dependency-path: mcp/go.mod
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
