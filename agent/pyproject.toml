@@ -3,3 +3,8 @@ members = [
     "worker",
     "ingestion",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.0",
+]
