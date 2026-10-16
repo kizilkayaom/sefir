@@ -6,9 +6,9 @@ import (
 )
 
 type Contact struct {
-	ID    string
-	Name  *string
-	Email *string
+	ID    string  `json:"id"`
+	Name  *string `json:"name"`
+	Email *string `json:"email"`
 }
 
 // Fetch a contact by ID only if it has been confirmed
