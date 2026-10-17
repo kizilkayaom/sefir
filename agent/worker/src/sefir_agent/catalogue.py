@@ -1,3 +1,5 @@
+from mcp.types import TextContent
+
 from mcp import Client, StdioServerParameters
 
 
@@ -22,10 +24,13 @@ async def get_confirmed_contact(contact_id: str) -> dict[str, object]:
             {"contact_id": contact_id},
         )
 
-        if result.is_error:
-            raise RuntimeError("Catalogue lookup failed")
+    if result.is_error:
+        message = "\n".join(
+            block.text for block in result.content if isinstance(block, TextContent)
+        )
+        raise RuntimeError(message or "Catalogue lookup failed")
 
-        if not isinstance(result.structured_content, dict):
-            raise TypeError("Catalogue returned an invalid contact")
+    if not isinstance(result.structured_content, dict):
+        raise TypeError("Catalogue returned an invalid contact")
 
-        return result.structured_content
+    return result.structured_content

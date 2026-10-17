@@ -27,9 +27,18 @@ func RegisterTools(server *mcp.Server, pool *pgxpool.Pool) {
 				},
 				"email": {
 					"anyOf": [{"type": "string"}, {"type": "null"}]
+				},
+				"organization": {
+					"anyOf": [{"type": "string"}, {"type": "null"}]
+				},
+				"role": {
+					"anyOf": [{"type": "string"}, {"type": "null"}]
+				},
+				"context": {
+					"anyOf": [{"type": "string"}, {"type": "null"}]
 				}
 			},
-			"required": ["id", "name", "email"],
+			"required": ["id", "name", "email", "organization", "role", "context"],
 			"additionalProperties": false
 		}`),
 	}, func(
