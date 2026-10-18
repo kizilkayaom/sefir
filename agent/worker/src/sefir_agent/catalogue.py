@@ -1,6 +1,6 @@
+from mcp import Client, StdioServerParameters
 from mcp.types import TextContent
 
-from mcp import Client, StdioServerParameters
 from sefir_agent.schemas import EmailDraft
 
 

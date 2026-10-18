@@ -8,3 +8,6 @@ members = [
 dev = [
     "ruff>=0.17.0",
 ]
+
+[tool.ruff]
+src = ["worker/src", "ingestion/src"]
