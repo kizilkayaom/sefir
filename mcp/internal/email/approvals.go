@@ -48,7 +48,6 @@ func ApproveDraft(
 		return ApprovalResult{}, errors.New("version must be at least 1")
 	}
 
-	// A lookup after an insert conflict must see the other transaction's commit.
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return ApprovalResult{}, err
@@ -112,7 +111,6 @@ func ApproveDraft(
 		&result.ApprovedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Another request created this approval after our initial lookup.
 		return getExistingApproval(ctx, tx, input)
 	}
 	if err != nil {

@@ -2,15 +2,13 @@ package catalogue
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/kizilkayaom/sefir/mcp/internal/draftcontent"
 )
 
 type Draft struct {
@@ -28,28 +26,6 @@ type CreateDraftInput struct {
 	ContactID string `json:"contact_id"`
 	Subject   string `json:"subject"`
 	Body      string `json:"body"`
-}
-
-func hashDraftContent(recipientEmail *string, subject, body string) (string, error) {
-	type DraftHash struct {
-		RecipientEmail *string `json:"recipient_email"`
-		Subject        string  `json:"subject"`
-		Body           string  `json:"body"`
-	}
-
-	payload := DraftHash{
-		RecipientEmail: recipientEmail,
-		Subject:        subject,
-		Body:           body,
-	}
-	serial, err := json.Marshal(payload)
-
-	if err != nil {
-		return "", err
-	}
-
-	digest := sha256.Sum256(serial)
-	return hex.EncodeToString(digest[:]), nil
 }
 
 func CreateDraft(
@@ -70,7 +46,7 @@ func CreateDraft(
 		return Draft{}, err
 	}
 
-	contentHash, err := hashDraftContent(contact.Email, input.Subject, input.Body)
+	contentHash, err := draftcontent.Hash(contact.Email, input.Subject, input.Body)
 	if err != nil {
 		return Draft{}, err
 	}
