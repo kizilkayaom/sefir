@@ -34,16 +34,19 @@ func parseMailbox(value string) (*mail.Address, error) {
 }
 
 func BuildMessage(input MessageInput) ([]byte, error) {
-	if _, err := parseMailbox(input.From); err != nil {
+	var builder strings.Builder
+	from, err := parseMailbox(input.From)
+	if err != nil {
 		return nil, err
 	}
 	if input.Draft.RecipientEmail == nil {
 		return nil, errors.New("recipient email address is required")
 	}
-	if _, err := parseMailbox(*input.Draft.RecipientEmail); err != nil {
+
+	to, err := parseMailbox(*input.Draft.RecipientEmail)
+	if err != nil {
 		return nil, err
 	}
-
 	if strings.TrimSpace(input.Draft.Subject) == "" {
 		return nil, errors.New("subject is required")
 	}
@@ -68,8 +71,17 @@ func BuildMessage(input MessageInput) ([]byte, error) {
 	if !utf8.ValidString(input.Draft.Body) {
 		return nil, errors.New("body must contain valid UTF-8")
 	}
-
-	return nil, errors.New("message encoding is not implemented yet")
+	builder.WriteString("From: " + from.String() + "\r\n")
+	builder.WriteString("To: " + to.String() + "\r\n")
+	builder.WriteString("Subject: " + encodeSubject(input.Draft.Subject) + "\r\n")
+	builder.WriteString("Date: " + input.Date.Format(time.RFC1123Z) + "\r\n")
+	builder.WriteString("Message-ID: " + input.MessageID + "\r\n")
+	builder.WriteString("MIME-Version: 1.0\r\n")
+	builder.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	builder.WriteString("Content-Transfer-Encoding: base64\r\n")
+	builder.WriteString("\r\n")
+	builder.WriteString(encodeMessageBody(input.Draft.Body))
+	return []byte(builder.String()), nil
 }
 
 func encodeMessageBody(body string) string {
