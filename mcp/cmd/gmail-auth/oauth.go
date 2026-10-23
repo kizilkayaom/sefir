@@ -1,14 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"fmt"
+	"github.com/kizilkayaom/sefir/mcp/internal/email"
+	"golang.org/x/oauth2"
 	"net/http"
 	"sync"
 	"time"
-
-	"golang.org/x/oauth2"
 )
 
 type oauthAttempt struct {
@@ -87,4 +89,72 @@ func (s *oauthServer) consumeAttempt(sessionID, state string) (oauthAttempt, err
 
 	delete(s.attempts, sessionID)
 	return attempt, nil
+}
+
+func (s *oauthServer) handleCallback(w http.ResponseWriter, r *http.Request) {
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+
+	cookie, err := r.Cookie("sefir_oauth")
+	if err != nil || cookie.Value == "" {
+		http.Error(w, "Missing sign-in session", http.StatusBadRequest)
+		return
+	}
+
+	query := r.URL.Query()
+	attempt, err := s.consumeAttempt(cookie.Value, query.Get("state"))
+
+	if err != nil {
+		http.Error(w, "Invalid or expired sign-in attempt", http.StatusBadRequest)
+		return
+	}
+	cookie = &http.Cookie{
+		Name:     "sefir_oauth",
+		Value:    "",
+		Path:     "/oauth/google",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Secure:   false,
+	}
+
+	http.SetCookie(w, cookie)
+
+	if query.Get("error") != "" {
+		http.Error(w, "Google authorization was not completed", http.StatusBadRequest)
+		return
+	}
+
+	if query.Get("code") == "" {
+		http.Error(w, "Missing authorization code", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	token, err := s.config.Exchange(
+		ctx,
+		query.Get("code"),
+		oauth2.VerifierOption(attempt.Verifier),
+	)
+
+	if err != nil {
+		http.Error(w, "Google authorization exchange failed", http.StatusBadGateway)
+		return
+	}
+	if !token.Valid() || token.RefreshToken == "" {
+		http.Error(w, "Google did not return the required tokens", http.StatusBadGateway)
+		return
+	}
+
+	err = email.SaveOAuthToken("../token-gmail.json", token)
+
+	if err != nil {
+		http.Error(w, "Could not save Gmail authorization", http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Fprint(w, "Gmail authorization saved. You can close this tab.")
 }

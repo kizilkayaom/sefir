@@ -27,7 +27,7 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /oauth/google/start", auth.handleStart)
-
+	mux.HandleFunc("GET /oauth/google/callback", auth.handleCallback)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
 	})
