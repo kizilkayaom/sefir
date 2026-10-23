@@ -16,6 +16,10 @@ type savingTokenSource struct {
 	mu        sync.Mutex
 }
 
+var ErrGmailReconnectRequired = errors.New(
+	"Gmail authorization is no longer valid; reconnect Gmail",
+)
+
 func SaveOAuthToken(tokenPath string, token *oauth2.Token) error {
 	if token == nil || strings.TrimSpace(tokenPath) == "" ||
 		token.AccessToken == "" || token.RefreshToken == "" {
@@ -78,6 +82,11 @@ func (s *savingTokenSource) Token() (*oauth2.Token, error) {
 
 	token, err := s.source.Token()
 	if err != nil {
+		var retrieveErr *oauth2.RetrieveError
+		if errors.As(err, &retrieveErr) &&
+			retrieveErr.ErrorCode == "invalid_grant" {
+			return nil, ErrGmailReconnectRequired
+		}
 		return nil, err
 	}
 

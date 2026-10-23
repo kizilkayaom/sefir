@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/kizilkayaom/sefir/mcp/internal/email"
 	"log/slog"
 	"os"
 	"time"
-
-	"github.com/kizilkayaom/sefir/mcp/internal/email"
 )
 
 func run() error {
@@ -38,7 +38,17 @@ func run() error {
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("Gmail connection check failed", "error", err)
+		if errors.Is(err, email.ErrGmailReconnectRequired) {
+			fmt.Fprintln(os.Stderr,
+				`Gmail authorization is no longer valid. Reconnect your account:
+
+			1. From the repository root, run: go -C mcp run ./cmd/gmail-auth
+			2. Open http://localhost:8080/oauth/google/start and complete authorization.
+			3. Run again: go -C mcp run ./cmd/gmail-check`,
+			)
+		} else {
+			slog.Error("Gmail connection check failed", "error", err)
+		}
 		os.Exit(1)
 	}
 }

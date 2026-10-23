@@ -53,6 +53,10 @@ func GetGmailProfile(ctx context.Context, client *http.Client) (GmailProfile, er
 
 	defer response.Body.Close()
 
+	if response.StatusCode == http.StatusUnauthorized {
+		return GmailProfile{}, ErrGmailReconnectRequired
+	}
+
 	if response.StatusCode != http.StatusOK {
 		var apiError struct {
 			Error struct {
