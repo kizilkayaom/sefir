@@ -7,7 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+type savingTokenSource struct {
+	source    oauth2.TokenSource
+	tokenPath string
+	mu        sync.Mutex
+}
 
 func SaveOAuthToken(tokenPath string, token *oauth2.Token) error {
 	if token == nil || strings.TrimSpace(tokenPath) == "" ||
@@ -63,4 +70,20 @@ func LoadOAuthToken(tokenPath string) (*oauth2.Token, error) {
 	}
 
 	return &token, nil
+}
+
+func (s *savingTokenSource) Token() (*oauth2.Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	token, err := s.source.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := SaveOAuthToken(s.tokenPath, token); err != nil {
+		return nil, err
+	}
+
+	return token, nil
 }
