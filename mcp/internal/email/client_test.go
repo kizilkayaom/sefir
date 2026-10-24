@@ -4,14 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/oauth2"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestNewGmailClientRefreshesAndSavesToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token.json")
@@ -174,5 +182,56 @@ func TestNewGmailClientRequiresReconnect(t *testing.T) {
 	}
 	if !savedToken.Expiry.Equal(token.Expiry) {
 		t.Errorf("saved token expiry = %v, want %v", savedToken.Expiry, token.Expiry)
+	}
+}
+
+func TestGetGmailProfileRequiresReconnect(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	profile, err := GetGmailProfile(context.Background(), client)
+	if !errors.Is(err, ErrGmailReconnectRequired) {
+		t.Fatalf("expected reconnect error, got %v", err)
+	}
+	if profile.EmailAddress != "" {
+		t.Fatalf("expected an empty email address, got %q", profile.EmailAddress)
+	}
+}
+
+func TestGetGmailProfilePreservesForbiddenError(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body: io.NopCloser(strings.NewReader(
+					`{"error":{"message":"Gmail API is disabled"}}`,
+				)),
+				Request: req,
+			}, nil
+		}),
+	}
+
+	profile, err := GetGmailProfile(context.Background(), client)
+	if err == nil {
+		t.Fatal("expected an error for HTTP 403")
+	}
+	if errors.Is(err, ErrGmailReconnectRequired) {
+		t.Error("HTTP 403 should not return the reconnect error")
+	}
+	if !strings.Contains(err.Error(), "HTTP 403") {
+		t.Errorf("error = %q, want HTTP 403", err.Error())
+	}
+	if !strings.Contains(err.Error(), "Gmail API is disabled") {
+		t.Errorf("error = %q, want the Gmail API error message", err.Error())
+	}
+	if profile.EmailAddress != "" {
+		t.Fatalf("expected an empty email address, got %q", profile.EmailAddress)
 	}
 }
