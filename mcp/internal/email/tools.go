@@ -3,13 +3,22 @@ package email
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func RegisterTools(server *mcp.Server, pool *pgxpool.Pool) {
+type SendOutboxInput struct {
+	OutboxID string `json:"outbox_id"`
+}
+
+func RegisterTools(server *mcp.Server,
+	pool *pgxpool.Pool,
+	client *http.Client,
+	from string,
+	messageIDDomain string) {
 	approvalOutputSchema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -32,6 +41,42 @@ func RegisterTools(server *mcp.Server, pool *pgxpool.Pool) {
 		"additionalProperties": false
 	}`)
 
+	outboxOutputSchema := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"outbox_id": {"type": "string", "format": "uuid"},
+			"approval_id": {"type": "string", "format": "uuid"},
+			"state": {
+				"type": "string",
+				"enum": ["pending", "sending", "sent", "failed", "needs_attention"]
+			},
+			"attempts": {"type": "integer", "minimum": 0},
+			"rfc822_message_id": {
+				"anyOf": [{"type": "string"}, {"type": "null"}]
+			},
+			"gmail_message_id": {
+				"anyOf": [{"type": "string"}, {"type": "null"}]
+			},
+			"last_error": {
+				"anyOf": [{"type": "string"}, {"type": "null"}]
+			},
+			"claimed_at": {
+				"anyOf": [
+					{"type": "string", "format": "date-time"},
+					{"type": "null"}
+				]
+			},
+			"created_at": {"type": "string", "format": "date-time"},
+			"updated_at": {"type": "string", "format": "date-time"}
+		},
+		"required": [
+			"outbox_id", "approval_id", "state", "attempts",
+			"rfc822_message_id", "gmail_message_id", "last_error",
+			"claimed_at", "created_at", "updated_at"
+		],
+		"additionalProperties": false
+	}`)
+
 	mcp.AddTool(server, &mcp.Tool{
 		Name:         "approve_draft",
 		Description:  "Record human approval of an exact draft version and queue it for sending.",
@@ -49,5 +94,24 @@ func RegisterTools(server *mcp.Server, pool *pgxpool.Pool) {
 			return nil, ApprovalResult{}, err
 		}
 		return nil, approval, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:         "send_outbox_message",
+		Description:  "Send an approved outbox entry and return its current delivery state.",
+		OutputSchema: outboxOutputSchema,
+	}, func(
+		ctx context.Context,
+		_ *mcp.CallToolRequest,
+		input SendOutboxInput,
+	) (*mcp.CallToolResult, OutboxEntry, error) {
+		ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+
+		entry, err := SendOutboxMessage(ctx, pool, client, input.OutboxID, from, messageIDDomain)
+		if err != nil {
+			return nil, OutboxEntry{}, err
+		}
+		return nil, entry, nil
 	})
 }
