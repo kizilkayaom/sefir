@@ -215,3 +215,51 @@ func MarkOutboxProblem(
 
 	return OutboxEntry{}, errors.New("outbox entry cannot be marked with this problem from its current state")
 }
+
+func ListStaleOutboxEntries(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	claimedBefore time.Time,
+	limit int,
+) ([]OutboxEntry, error) {
+	if pool == nil {
+		return nil, errors.New("database pool is required")
+	}
+	if claimedBefore.IsZero() {
+		return nil, errors.New("claimed_before is required")
+	}
+	if limit < 1 || limit > 100 {
+		return nil, errors.New("limit must be between 1 and 100")
+	}
+
+	const query = `
+		SELECT outbox_id::text, approval_id::text, state, attempts,
+			rfc822_message_id, gmail_message_id, last_error,
+			claimed_at, created_at, updated_at
+		FROM outbox
+		WHERE state = 'sending'
+			AND claimed_at < $1
+			AND gmail_message_id IS NULL
+		ORDER BY claimed_at ASC, outbox_id ASC
+		LIMIT $2
+	`
+	rows, err := pool.Query(ctx, query, claimedBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]OutboxEntry, 0, limit)
+	for rows.Next() {
+		entry, err := scanOutboxEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return entries, nil
+}
