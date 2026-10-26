@@ -20,6 +20,23 @@ jobs:
 
   go:
     runs-on: ubuntu-latest
+    env:
+      TEST_DATABASE_URL: postgres://sefir:sefir_ci@localhost:5432/sefir_test?sslmode=disable
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg17
+        env:
+          POSTGRES_DB: sefir_test
+          POSTGRES_USER: sefir
+          POSTGRES_PASSWORD: sefir_ci
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U sefir -d sefir_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: mcp
@@ -35,8 +52,17 @@ jobs:
         run: go build ./...
       - name: Vet
         run: go vet ./...
+      - name: Install Goose
+        run: go install github.com/pressly/goose/v3/cmd/goose@v3.29.0
+
+      - name: Apply test database migrations
+        env:
+          GOOSE_DRIVER: postgres
+          GOOSE_DBSTRING: ${{ env.TEST_DATABASE_URL }}
+        run: goose -env=none -dir ../db/migrations up
+
       - name: Test
-        run: go test ./...
+        run: go test -race -count=1 -v ./...
   python:
     runs-on: ubuntu-latest
     defaults:
