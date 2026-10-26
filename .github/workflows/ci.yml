@@ -81,3 +81,5 @@ jobs:
         run: uv run --locked ruff check .
       - name: Check ruff format
         run: uv run --locked ruff format --check .
+      - name: Test Python workflows
+        run: uv run --locked --package sefir-agent python -m unittest discover -s worker/tests -v
