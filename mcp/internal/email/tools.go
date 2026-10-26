@@ -14,6 +14,16 @@ type SendOutboxInput struct {
 	OutboxID string `json:"outbox_id"`
 }
 
+type RecoverOutboxInput struct {
+	OlderThanMinutes int `json:"older_than_minutes"`
+	Limit            int `json:"limit"`
+}
+
+type RecoverOutboxResult struct {
+	Entries []OutboxEntry `json:"entries"`
+	Error   string        `json:"error"`
+}
+
 func RegisterTools(server *mcp.Server,
 	pool *pgxpool.Pool,
 	client *http.Client,
