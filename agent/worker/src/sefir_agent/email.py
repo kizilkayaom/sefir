@@ -23,7 +23,7 @@ async def approve_draft(
         ],
     )
 
-    async with Client(server) as client:
+    async with Client(server, mode="legacy") as client:
         result = await client.call_tool(
             "approve_draft",
             {
@@ -43,5 +43,38 @@ async def approve_draft(
 
     if not isinstance(result.structured_content, dict):
         raise TypeError("Email MCP returned an invalid approval")
+
+    return result.structured_content
+
+
+async def send_outbox_message(outbox_id: str) -> dict[str, object]:
+    server = StdioServerParameters(
+        command="uv",
+        args=[
+            "run",
+            "--env-file",
+            ".env",
+            "go",
+            "-C",
+            "mcp",
+            "run",
+            "./cmd/email-mcp",
+        ],
+    )
+
+    async with Client(server, mode="legacy") as client:
+        result = await client.call_tool(
+            "send_outbox_message",
+            {"outbox_id": outbox_id},
+        )
+
+    if result.is_error:
+        message = "\n".join(
+            block.text for block in result.content if isinstance(block, TextContent)
+        )
+        raise RuntimeError(message or "Outbox send failed")
+
+    if not isinstance(result.structured_content, dict):
+        raise TypeError("Email MCP returned an invalid outbox entry")
 
     return result.structured_content

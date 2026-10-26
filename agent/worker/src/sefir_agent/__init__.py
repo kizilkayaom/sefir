@@ -5,7 +5,7 @@ from pathlib import Path
 from sefir_agent.catalogue import create_draft, get_confirmed_contact, get_draft
 from sefir_agent.cv import load_cv
 from sefir_agent.drafting import draft_outreach
-from sefir_agent.email import approve_draft
+from sefir_agent.email import approve_draft, send_outbox_message
 
 
 async def run_outreach(contact_id: str, cv_text: str) -> dict[str, object]:
@@ -16,7 +16,7 @@ async def run_outreach(contact_id: str, cv_text: str) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate, review, or approve outreach drafts."
+        description="Generate, review, approve, or send outreach emails."
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -68,12 +68,39 @@ def main() -> None:
         required=True,
         help="UUID generated once and reused for retries",
     )
+
+    send_parser = commands.add_parser("send", help="Send an approved outbox entry")
+    send_parser.add_argument(
+        "--outbox-id",
+        required=True,
+        help="UUID of the approved outbox entry",
+    )
+
     args = parser.parse_args()
 
     if args.command == "review" and args.version < 1:
         review_parser.error("--version must be at least 1")
     if args.command == "approve" and args.version < 1:
         approve_parser.error("--version must be at least 1")
+    if args.command == "send":
+        try:
+            entry = asyncio.run(send_outbox_message(args.outbox_id))
+        except (RuntimeError, TypeError, OSError, ValueError) as exc:
+            parser.exit(1, f"Error: {exc}\n")
+
+        print(f"Outbox ID: {entry['outbox_id']}")
+        print(f"Outbox state: {entry['state']}")
+        print(f"Attempts: {entry['attempts']}")
+        if entry.get("gmail_message_id"):
+            print(f"Gmail message ID: {entry['gmail_message_id']}")
+        if entry.get("last_error"):
+            print(f"Last error: {entry['last_error']}")
+
+        if entry["state"] != "sent":
+            parser.exit(
+                1, f"Error: Sending was not confirmed (state: {entry['state']}).\n"
+            )
+        return
 
     try:
         if args.command == "draft":
