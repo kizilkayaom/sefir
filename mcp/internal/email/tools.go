@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -123,5 +124,51 @@ func RegisterTools(server *mcp.Server,
 			return nil, OutboxEntry{}, err
 		}
 		return nil, entry, nil
+	})
+
+	recoveryInputSchema := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"older_than_minutes": {"type": "integer", "minimum": 1, "maximum": 10080},
+			"limit": {"type": "integer", "minimum": 1, "maximum": 100}
+		},
+		"required": ["older_than_minutes", "limit"],
+		"additionalProperties": false
+	}`)
+
+	recoveryOutputSchema := json.RawMessage(fmt.Sprintf(`{
+		"type": "object",
+		"properties": {
+			"entries": {"type": "array", "items": %s},
+			"error": {"type": "string"}
+		},
+		"required": ["entries", "error"],
+		"additionalProperties": false
+	}`, outboxOutputSchema))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:         "recover_stale_outbox_entries",
+		Description:  "Check stale sending entries against Gmail and record confirmed matches.",
+		InputSchema:  recoveryInputSchema,
+		OutputSchema: recoveryOutputSchema,
+	}, func(
+		ctx context.Context,
+		_ *mcp.CallToolRequest,
+		input RecoverOutboxInput,
+	) (*mcp.CallToolResult, RecoverOutboxResult, error) {
+		ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+
+		cutoff := time.Now().Add(-time.Duration(input.OlderThanMinutes) * time.Minute)
+		entries, err := RecoverStaleOutboxEntries(ctx, pool, client, cutoff, input.Limit)
+		if entries == nil {
+			entries = []OutboxEntry{}
+		}
+
+		result := RecoverOutboxResult{Entries: entries}
+		if err != nil {
+			result.Error = err.Error()
+		}
+		return nil, result, nil
 	})
 }

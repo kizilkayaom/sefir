@@ -78,3 +78,58 @@ async def send_outbox_message(outbox_id: str) -> dict[str, object]:
         raise TypeError("Email MCP returned an invalid outbox entry")
 
     return result.structured_content
+
+
+async def recover_stale_outbox_entries(
+    older_than_minutes: int,
+    limit: int,
+) -> dict[str, object]:
+    if not 1 <= older_than_minutes <= 10080:
+        raise ValueError("older_than_minutes must be between 1 and 10080")
+
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+
+    server = StdioServerParameters(
+        command="uv",
+        args=[
+            "run",
+            "--env-file",
+            ".env",
+            "go",
+            "-C",
+            "mcp",
+            "run",
+            "./cmd/email-mcp",
+        ],
+    )
+
+    async with Client(server, mode="legacy") as client:
+        result = await client.call_tool(
+            "recover_stale_outbox_entries",
+            {
+                "older_than_minutes": older_than_minutes,
+                "limit": limit,
+            },
+            read_timeout_seconds=60,
+        )
+
+    if result.is_error:
+        message = "\n".join(
+            block.text for block in result.content if isinstance(block, TextContent)
+        )
+        raise RuntimeError(message or "Outbox recovery failed")
+
+    if not isinstance(result.structured_content, dict):
+        raise TypeError("Email MCP returned an invalid recovery result")
+
+    entries = result.structured_content.get("entries")
+    if not isinstance(entries, list) or not all(
+        isinstance(entry, dict) for entry in entries
+    ):
+        raise TypeError("Email MCP returned invalid recovery entries")
+
+    if not isinstance(result.structured_content.get("error"), str):
+        raise TypeError("Email MCP returned an invalid recovery error")
+
+    return result.structured_content

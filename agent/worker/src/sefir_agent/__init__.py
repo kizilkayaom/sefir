@@ -5,7 +5,11 @@ from pathlib import Path
 from sefir_agent.catalogue import create_draft, get_confirmed_contact, get_draft
 from sefir_agent.cv import load_cv
 from sefir_agent.drafting import draft_outreach
-from sefir_agent.email import approve_draft, send_outbox_message
+from sefir_agent.email import (
+    approve_draft,
+    recover_stale_outbox_entries,
+    send_outbox_message,
+)
 
 
 async def run_outreach(contact_id: str, cv_text: str) -> dict[str, object]:
@@ -16,7 +20,7 @@ async def run_outreach(contact_id: str, cv_text: str) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate, review, approve, or send outreach emails."
+        description="Generate, review, approve, send, or recover outreach emails."
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -76,6 +80,22 @@ def main() -> None:
         help="UUID of the approved outbox entry",
     )
 
+    recover_parser = commands.add_parser(
+        "recover",
+        help="Check stale sending entries against Gmail and record confirmed matches.",
+    )
+    recover_parser.add_argument(
+        "--older-than-minutes",
+        default=10,
+        type=int,
+    )
+
+    recover_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+    )
+
     args = parser.parse_args()
 
     if args.command == "review" and args.version < 1:
@@ -100,6 +120,31 @@ def main() -> None:
             parser.exit(
                 1, f"Error: Sending was not confirmed (state: {entry['state']}).\n"
             )
+        return
+
+    if args.command == "recover":
+        try:
+            result = asyncio.run(
+                recover_stale_outbox_entries(args.older_than_minutes, args.limit)
+            )
+        except (RuntimeError, TypeError, OSError, ValueError) as exc:
+            parser.exit(1, f"Error: {exc}\n")
+
+        entries = result["entries"]
+        for entry in entries:
+            print(f"Outbox ID: {entry['outbox_id']}")
+            print(f"Outbox state: {entry['state']}")
+            if entry.get("gmail_message_id"):
+                print(f"Gmail message ID: {entry['gmail_message_id']}")
+
+        if result["error"]:
+            parser.exit(1, f"Error: {result['error']}\n")
+
+        if any(entry["state"] != "sent" for entry in entries):
+            parser.exit(1, "Error: Some sends remain unconfirmed after recovery.\n")
+
+        if not entries:
+            print("No stale outbox entries found.")
         return
 
     try:
