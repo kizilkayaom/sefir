@@ -15,6 +15,7 @@ from sefir_agent.email import (
     send_outbox_message,
 )
 from sefir_agent.temporal_client import (
+    get_approval_workflow_status,
     signal_workflow_approval,
     start_approval_workflow,
 )
@@ -47,6 +48,11 @@ async def run_approve_workflow(approval: DraftApproval) -> None:
 
     client = await Client.connect("127.0.0.1:7233")
     await signal_workflow_approval(client, approval)
+
+
+async def run_workflow_status(draft_id: str, version: int) -> dict[str, str]:
+    client = await Client.connect("127.0.0.1:7233")
+    return await get_approval_workflow_status(client, draft_id, version)
 
 
 def main() -> None:
@@ -173,6 +179,21 @@ def main() -> None:
         required=True,
     )
 
+    workflow_status_parser = commands.add_parser(
+        "workflow-status",
+        help="Check an approval workflow's status",
+    )
+    workflow_status_parser.add_argument(
+        "--draft-id",
+        type=str,
+        required=True,
+    )
+    workflow_status_parser.add_argument(
+        "--version",
+        type=int,
+        required=True,
+    )
+
     args = parser.parse_args()
 
     if args.command == "review" and args.version < 1:
@@ -199,6 +220,20 @@ def main() -> None:
         print(f"Workflow ID: {workflow_id}")
         print("Waiting for approval")
         return
+
+    if args.command == "workflow-status":
+        if args.version < 1:
+            workflow_status_parser.error("--version must be at least 1")
+        try:
+            result = asyncio.run(run_workflow_status(args.draft_id, args.version))
+        except (RuntimeError, TypeError, OSError, ValueError, RPCError) as exc:
+            parser.exit(1, f"Error: {exc}\n")
+
+        print(f"Workflow ID: {result['workflow_id']}")
+        print(f"Run ID: {result['run_id']}")
+        print(f"Status: {result['status']}")
+        return
+
     if args.command == "send":
         try:
             entry = asyncio.run(send_outbox_message(args.outbox_id))
@@ -258,25 +293,41 @@ def main() -> None:
     print(f"To: {saved_draft['recipient_email'] or '(no recipient email)'}")
     print(f"Subject: {saved_draft['subject']}\n\n{saved_draft['body']}")
 
-    if args.command != "approve":
+    if args.command not in ("approve", "approve-workflow"):
         return
 
     recipient = saved_draft["recipient_email"]
     if not recipient or not recipient.strip():
         parser.exit(1, "Error: Draft recipient email is required.\n")
 
+    prompt = "\nType approve to approve this exact draft version: "
+    if args.command == "approve-workflow":
+        prompt = "\nType approve to approve and send this exact draft version: "
+
     try:
-        confirmation = (
-            input("\nType approve to approve this exact draft version: ")
-            .strip()
-            .lower()
-        )
+        confirmation = input(prompt).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print("\nApproval cancelled.")
         return
 
     if confirmation != "approve":
         print("Approval cancelled.")
+        return
+
+    if args.command == "approve-workflow":
+        workflow_approval = DraftApproval(
+            approval_id=args.approval_id,
+            draft_id=saved_draft["draft_id"],
+            version=saved_draft["version"],
+            content_hash=saved_draft["content_hash"],
+            approved_by=args.approved_by,
+        )
+        try:
+            asyncio.run(run_approve_workflow(workflow_approval))
+        except (RuntimeError, TypeError, OSError, ValueError, RPCError) as exc:
+            parser.exit(1, f"Error: {exc}\n")
+
+        print("Approval signal sent.")
         return
 
     try:
