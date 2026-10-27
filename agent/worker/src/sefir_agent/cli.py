@@ -2,6 +2,10 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from temporalio.client import Client
+from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.service import RPCError
+
 from sefir_agent.catalogue import create_draft, get_confirmed_contact, get_draft
 from sefir_agent.cv import load_cv
 from sefir_agent.drafting import draft_outreach
@@ -10,12 +14,39 @@ from sefir_agent.email import (
     recover_stale_outbox_entries,
     send_outbox_message,
 )
+from sefir_agent.temporal_client import (
+    signal_workflow_approval,
+    start_approval_workflow,
+)
+from sefir_agent.workflow_types import ApprovalWorkflowInput, DraftApproval
 
 
 async def run_outreach(contact_id: str, cv_text: str) -> dict[str, object]:
     contact = await get_confirmed_contact(contact_id=contact_id)
     draft = await draft_outreach(contact=contact, cv_text=cv_text)
     return await create_draft(contact_id=contact_id, draft=draft)
+
+
+async def run_start_workflow(draft_id: str, version: int) -> str:
+    draft = await get_draft(draft_id=draft_id, version=version)
+    request = ApprovalWorkflowInput(
+        draft_id=draft["draft_id"],
+        version=draft["version"],
+        content_hash=draft["content_hash"],
+    )
+
+    client = await Client.connect("127.0.0.1:7233")
+    return await start_approval_workflow(client, request)
+
+
+async def run_approve_workflow(approval: DraftApproval) -> None:
+    if not approval.approval_id.strip():
+        raise ValueError("Approval ID must not be blank")
+    if not approval.approved_by.strip():
+        raise ValueError("Approver must not be blank")
+
+    client = await Client.connect("127.0.0.1:7233")
+    await signal_workflow_approval(client, approval)
 
 
 def main() -> None:
@@ -96,12 +127,78 @@ def main() -> None:
         default=10,
     )
 
+    workflow_parser = commands.add_parser(
+        "start-workflow",
+        help="Start a workflow that waits for draft approval",
+    )
+
+    workflow_parser.add_argument(
+        "--draft-id",
+        type=str,
+        required=True,
+    )
+
+    workflow_parser.add_argument(
+        "--version",
+        type=int,
+        required=True,
+    )
+
+    workflow_approve_parser = commands.add_parser(
+        "approve-workflow",
+        help="Review a draft and approve sending through its workflow",
+    )
+
+    workflow_approve_parser.add_argument(
+        "--draft-id",
+        type=str,
+        required=True,
+    )
+
+    workflow_approve_parser.add_argument(
+        "--version",
+        type=int,
+        required=True,
+    )
+
+    workflow_approve_parser.add_argument(
+        "--approved-by",
+        type=str,
+        required=True,
+    )
+
+    workflow_approve_parser.add_argument(
+        "--approval-id",
+        type=str,
+        required=True,
+    )
+
     args = parser.parse_args()
 
     if args.command == "review" and args.version < 1:
         review_parser.error("--version must be at least 1")
     if args.command == "approve" and args.version < 1:
         approve_parser.error("--version must be at least 1")
+    if args.command == "approve-workflow" and args.version < 1:
+        workflow_approve_parser.error("--version must be at least 1")
+    if args.command == "start-workflow":
+        if args.version < 1:
+            workflow_parser.error("--version must be at least 1")
+        try:
+            workflow_id = asyncio.run(run_start_workflow(args.draft_id, args.version))
+        except (
+            RuntimeError,
+            TypeError,
+            OSError,
+            ValueError,
+            RPCError,
+            WorkflowAlreadyStartedError,
+        ) as exc:
+            parser.exit(1, f"Error: {exc}\n")
+
+        print(f"Workflow ID: {workflow_id}")
+        print("Waiting for approval")
+        return
     if args.command == "send":
         try:
             entry = asyncio.run(send_outbox_message(args.outbox_id))
