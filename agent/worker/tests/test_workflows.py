@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 from temporalio.exceptions import ActivityError, ApplicationError, RetryState
@@ -213,3 +214,149 @@ class ApprovalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             execute_activity.await_args_list[1].args,
             ("deliver_outbox_message", "outbox-test"),
         )
+
+    async def test_invalid_approval_does_not_start_activities(self) -> None:
+        request = ApprovalWorkflowInput(
+            draft_id="11111111-1111-4111-8111-111111111111",
+            version=1,
+            content_hash="a" * 64,
+        )
+        valid_approval = DraftApproval(
+            approval_id="22222222-2222-4222-8222-222222222222",
+            draft_id=request.draft_id,
+            version=request.version,
+            content_hash=request.content_hash,
+            approved_by="Test reviewer",
+        )
+        cases = (
+            (
+                "wrong_draft_id",
+                replace(
+                    valid_approval,
+                    draft_id="33333333-3333-4333-8333-333333333333",
+                ),
+            ),
+            ("wrong_version", replace(valid_approval, version=2)),
+            ("wrong_content_hash", replace(valid_approval, content_hash="b" * 64)),
+            ("empty_approval_id", replace(valid_approval, approval_id="")),
+            ("blank_approval_id", replace(valid_approval, approval_id=" \t\n")),
+            ("empty_approver", replace(valid_approval, approved_by="")),
+            ("blank_approver", replace(valid_approval, approved_by=" \t\n")),
+        )
+
+        for case, invalid_approval in cases:
+            with self.subTest(case=case):
+                instance = ApprovalWorkflow(request)
+                approval_result = {"outbox_id": "outbox-test"}
+                delivery_result = {
+                    "outbox_id": "outbox-test",
+                    "state": "sent",
+                    "gmail_message_id": "gmail-test",
+                    "last_error": None,
+                }
+                execute_activity = AsyncMock(
+                    side_effect=[approval_result, delivery_result]
+                )
+
+                async def fake_wait(
+                    condition,
+                    instance=instance,
+                    execute_activity=execute_activity,
+                ) -> None:
+                    self.assertFalse(condition())
+                    execute_activity.assert_not_awaited()
+                    instance.approve(valid_approval)
+                    self.assertTrue(condition())
+
+                wait_condition = AsyncMock(side_effect=fake_wait)
+
+                with (
+                    patch(
+                        "sefir_agent.workflows.workflow.wait_condition",
+                        wait_condition,
+                    ),
+                    patch(
+                        "sefir_agent.workflows.workflow.execute_activity",
+                        execute_activity,
+                    ),
+                    patch("sefir_agent.workflows.workflow.logger.warning"),
+                ):
+                    instance.approve(invalid_approval)
+                    result = await instance.run(request)
+
+                wait_condition.assert_awaited_once()
+                self.assertEqual(result, delivery_result)
+                self.assertEqual(execute_activity.await_count, 2)
+                self.assertEqual(
+                    execute_activity.await_args_list[0].args,
+                    ("record_draft_approval", valid_approval),
+                )
+                self.assertEqual(
+                    execute_activity.await_args_list[1].args,
+                    ("deliver_outbox_message", "outbox-test"),
+                )
+
+    async def test_first_approval_is_preserved(self) -> None:
+        request = ApprovalWorkflowInput(
+            draft_id="11111111-1111-4111-8111-111111111111",
+            version=1,
+            content_hash="a" * 64,
+        )
+        first_approval = DraftApproval(
+            approval_id="22222222-2222-4222-8222-222222222222",
+            draft_id=request.draft_id,
+            version=request.version,
+            content_hash=request.content_hash,
+            approved_by="Test reviewer",
+        )
+        cases = (
+            ("duplicate", first_approval),
+            (
+                "different_approval",
+                replace(
+                    first_approval,
+                    approval_id="33333333-3333-4333-8333-333333333333",
+                    approved_by="Another reviewer",
+                ),
+            ),
+        )
+
+        for case, second_approval in cases:
+            with self.subTest(case=case):
+                instance = ApprovalWorkflow(request)
+                instance.approve(first_approval)
+                instance.approve(second_approval)
+
+                approval_result = {"outbox_id": "outbox-test"}
+                delivery_result = {
+                    "outbox_id": "outbox-test",
+                    "state": "sent",
+                    "gmail_message_id": "gmail-test",
+                    "last_error": None,
+                }
+                execute_activity = AsyncMock(
+                    side_effect=[approval_result, delivery_result]
+                )
+
+                with (
+                    patch(
+                        "sefir_agent.workflows.workflow.wait_condition",
+                        new_callable=AsyncMock,
+                    ),
+                    patch(
+                        "sefir_agent.workflows.workflow.execute_activity",
+                        execute_activity,
+                    ),
+                ):
+                    result = await instance.run(request)
+
+                self.assertEqual(result, delivery_result)
+                self.assertEqual(execute_activity.await_count, 2)
+                self.assertEqual(
+                    execute_activity.await_args_list[0].args,
+                    ("record_draft_approval", first_approval),
+                )
+                self.assertEqual(
+                    execute_activity.await_args_list[1].args,
+                    ("deliver_outbox_message", "outbox-test"),
+                )

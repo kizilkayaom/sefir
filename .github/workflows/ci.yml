@@ -83,3 +83,14 @@ jobs:
         run: uv run --locked ruff format --check .
       - name: Test Python workflows
         run: uv run --locked --package sefir-agent python -m unittest discover -s worker/tests -v
+      - name: Install Temporal CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/temporal-bin"
+          curl --fail --location --retry 3 https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_amd64.tar.gz -o "$RUNNER_TEMP/temporal.tar.gz"
+          echo "09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5  $RUNNER_TEMP/temporal.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/temporal.tar.gz" -C "$RUNNER_TEMP/temporal-bin"
+          echo "$RUNNER_TEMP/temporal-bin" >> "$GITHUB_PATH"
+
+      - name: Test Temporal integration
+        timeout-minutes: 5
+        run: uv run --locked --package sefir-agent python -m unittest discover -s worker/integration_tests -v
