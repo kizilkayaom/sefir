@@ -1,4 +1,6 @@
-from temporalio.client import Client
+from typing import Any
+
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from sefir_agent.workflow_types import ApprovalWorkflowInput, DraftApproval
@@ -35,14 +37,27 @@ async def get_approval_workflow_status(
     client: Client,
     draft_id: str,
     version: int,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     workflow_id = f"approval-{draft_id}-v{version}"
     handle = client.get_workflow_handle(workflow_id)
     description = await handle.describe()
-    return {
+    result = {
         "workflow_id": description.id,
         "run_id": description.run_id,
         "status": description.status.name
         if description.status is not None
         else "UNKNOWN",
+        "delivery": None,
     }
+    if description.status == WorkflowExecutionStatus.COMPLETED:
+        completed_handle = client.get_workflow_handle(
+            description.id,
+            run_id=description.run_id,
+            result_type=dict[str, Any],
+        )
+        delivery = await completed_handle.result(follow_runs=False)
+        if not isinstance(delivery, dict):
+            raise TypeError("Workflow returned an invalid delivery result")
+        result["delivery"] = delivery
+
+    return result

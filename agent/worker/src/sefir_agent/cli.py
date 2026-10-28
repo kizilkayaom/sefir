@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 from pathlib import Path
+from typing import Any
 
 from temporalio.client import Client
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -50,7 +51,7 @@ async def run_approve_workflow(approval: DraftApproval) -> None:
     await signal_workflow_approval(client, approval)
 
 
-async def run_workflow_status(draft_id: str, version: int) -> dict[str, str]:
+async def run_workflow_status(draft_id: str, version: int) -> dict[str, Any]:
     client = await Client.connect("127.0.0.1:7233")
     return await get_approval_workflow_status(client, draft_id, version)
 
@@ -232,6 +233,12 @@ def main() -> None:
         print(f"Workflow ID: {result['workflow_id']}")
         print(f"Run ID: {result['run_id']}")
         print(f"Status: {result['status']}")
+        delivery = result.get("delivery")
+        if delivery is not None:
+            print(f"Outbox ID: {delivery['outbox_id']}")
+            print(f"Outbox state: {delivery['state']}")
+            if delivery.get("gmail_message_id"):
+                print(f"Gmail message ID: {delivery['gmail_message_id']}")
         return
 
     if args.command == "send":
