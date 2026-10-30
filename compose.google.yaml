@@ -1,0 +1,17 @@
+services:
+  web:
+    volumes:
+      - type: bind
+        source: ./credentials-gmail.json
+        target: /data/credentials-gmail.json
+        read_only: true
+        bind:
+          create_host_path: false
+  worker:
+    volumes:
+      - type: bind
+        source: ./credentials-gmail.json
+        target: /data/credentials-gmail.json
+        read_only: true
+        bind:
+          create_host_path: false

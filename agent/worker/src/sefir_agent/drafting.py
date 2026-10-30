@@ -1,4 +1,5 @@
 import json
+import os
 
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
@@ -6,12 +7,17 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types
 from pydantic import ValidationError
 
+from sefir_agent.providers import resolve_provider
 from sefir_agent.schemas import EmailDraft
 
 
-def create_drafting_agent() -> LlmAgent:
+def create_drafting_agent(provider_id: str | None = None) -> LlmAgent:
     name = "outreach_drafter"
-    model = LiteLlm(model="cohere_chat/command-a-plus-05-2026")
+    provider = resolve_provider(provider_id)
+    model = LiteLlm(
+        model=f"{provider.prefix}/{provider.model()}",
+        api_key=os.environ[provider.key_variable].strip(),
+    )
     instruction = """
     - Draft a concise, professional outreach email using the supplied résumé and contact.
     - Ground personal claims in the provided facts, and omit unsupported details.
@@ -53,11 +59,12 @@ def build_draft_message(
 async def draft_outreach(
     contact: dict[str, object],
     cv_text: str,
+    provider_id: str | None = None,
 ) -> EmailDraft:
     message = build_draft_message(contact=contact, cv_text=cv_text)
     draft = ""
     async with InMemoryRunner(
-        agent=create_drafting_agent(),
+        agent=create_drafting_agent(provider_id),
         app_name="sefir_agent",
     ) as runner:
         session = await runner.session_service.create_session(

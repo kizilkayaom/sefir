@@ -32,6 +32,7 @@ func RegisterTools(server *mcp.Server, pool *pgxpool.Pool) {
 			},
 			"subject": {"type": "string", "minLength": 1},
 			"body": {"type": "string", "minLength": 1},
+			"body_html": {"type": "string"},
 			"content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
 			"created_at": {"type": "string", "format": "date-time"}
 		},

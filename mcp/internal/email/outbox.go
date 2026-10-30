@@ -38,6 +38,34 @@ func ClaimOutbox(
 		return OutboxEntry{}, false, err
 	}
 
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return OutboxEntry{}, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	const accountQuery = `
+		SELECT acc.deletion_requested_at
+		FROM outbox AS o
+		JOIN approvals AS a ON a.approval_id = o.approval_id
+		JOIN drafts AS d ON d.draft_id = a.draft_id AND d.version = a.version
+		JOIN contacts AS c ON c.id = d.contact_id
+		JOIN accounts AS acc ON acc.account_id = c.account_id
+		WHERE o.outbox_id = $1
+		FOR SHARE OF acc
+	`
+	var deletionRequestedAt *time.Time
+	err = tx.QueryRow(ctx, accountQuery, outboxID).Scan(&deletionRequestedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OutboxEntry{}, false, errors.New("outbox entry not found")
+	}
+	if err != nil {
+		return OutboxEntry{}, false, err
+	}
+	if deletionRequestedAt != nil {
+		return OutboxEntry{}, false, errors.New("account is pending deletion")
+	}
+
 	const claimQuery = `
 		UPDATE outbox
 		SET state = 'sending',
@@ -53,8 +81,11 @@ func ClaimOutbox(
 			rfc822_message_id, gmail_message_id, last_error,
 			claimed_at, created_at, updated_at
 	`
-	entry, err := scanOutboxEntry(pool.QueryRow(ctx, claimQuery, outboxID, messageIDDomain))
+	entry, err := scanOutboxEntry(tx.QueryRow(ctx, claimQuery, outboxID, messageIDDomain))
 	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return OutboxEntry{}, false, err
+		}
 		return entry, true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -68,11 +99,14 @@ func ClaimOutbox(
 		FROM outbox
 		WHERE outbox_id = $1
 	`
-	entry, err = scanOutboxEntry(pool.QueryRow(ctx, lookupQuery, outboxID))
+	entry, err = scanOutboxEntry(tx.QueryRow(ctx, lookupQuery, outboxID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OutboxEntry{}, false, errors.New("outbox entry not found")
 	}
 	if err != nil {
+		return OutboxEntry{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return OutboxEntry{}, false, err
 	}
 	return entry, false, nil

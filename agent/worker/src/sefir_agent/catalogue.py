@@ -1,11 +1,23 @@
+import os
+
 from mcp import Client, StdioServerParameters
 from mcp.types import TextContent
 
 from sefir_agent.schemas import EmailDraft
 
 
-async def get_confirmed_contact(contact_id: str) -> dict[str, object]:
-    server = StdioServerParameters(
+def catalogue_server_parameters() -> StdioServerParameters:
+    environment = {}
+    if "DATABASE_URL" in os.environ:
+        environment["DATABASE_URL"] = os.environ["DATABASE_URL"]
+    if "PGPASSWORD" in os.environ:
+        environment["PGPASSWORD"] = os.environ["PGPASSWORD"]
+
+    executable = os.environ.get("SEFIR_CATALOGUE_MCP_BIN")
+    if executable:
+        return StdioServerParameters(command=executable, env=environment)
+
+    return StdioServerParameters(
         command="uv",
         args=[
             "run",
@@ -17,9 +29,12 @@ async def get_confirmed_contact(contact_id: str) -> dict[str, object]:
             "run",
             "./cmd/catalogue-mcp",
         ],
+        env=environment,
     )
 
-    async with Client(server) as client:
+
+async def get_confirmed_contact(contact_id: str) -> dict[str, object]:
+    async with Client(catalogue_server_parameters()) as client:
         result = await client.call_tool(
             "get_confirmed_contact",
             {"contact_id": contact_id},
@@ -41,21 +56,7 @@ async def create_draft(
     contact_id: str,
     draft: EmailDraft,
 ) -> dict[str, object]:
-    server = StdioServerParameters(
-        command="uv",
-        args=[
-            "run",
-            "--env-file",
-            ".env",
-            "go",
-            "-C",
-            "mcp",
-            "run",
-            "./cmd/catalogue-mcp",
-        ],
-    )
-
-    async with Client(server) as client:
+    async with Client(catalogue_server_parameters()) as client:
         result = await client.call_tool(
             "create_draft",
             {
@@ -78,21 +79,7 @@ async def create_draft(
 
 
 async def get_draft(draft_id: str, version: int) -> dict[str, object]:
-    server = StdioServerParameters(
-        command="uv",
-        args=[
-            "run",
-            "--env-file",
-            ".env",
-            "go",
-            "-C",
-            "mcp",
-            "run",
-            "./cmd/catalogue-mcp",
-        ],
-    )
-
-    async with Client(server) as client:
+    async with Client(catalogue_server_parameters()) as client:
         result = await client.call_tool(
             "get_draft",
             {"draft_id": draft_id, "version": version},

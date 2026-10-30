@@ -16,6 +16,7 @@ type ApprovedDraft struct {
 	RecipientEmail *string
 	Subject        string
 	Body           string
+	BodyHTML       string
 	ContentHash    string
 }
 
@@ -31,7 +32,7 @@ func GetApprovedDraft(
 
 	const query = `
 		SELECT d.draft_id::text, d.version, d.recipient_email,
-			d.subject, d.body, a.content_hash, d.content_hash
+			d.subject, d.body, d.body_html, a.content_hash, d.content_hash
 		FROM outbox AS o
 		JOIN approvals AS a ON a.approval_id = o.approval_id
 		JOIN drafts AS d ON d.draft_id = a.draft_id AND d.version = a.version
@@ -46,6 +47,7 @@ func GetApprovedDraft(
 		&draft.RecipientEmail,
 		&draft.Subject,
 		&draft.Body,
+		&draft.BodyHTML,
 		&draft.ContentHash,
 		&storedHash,
 	)
@@ -60,7 +62,7 @@ func GetApprovedDraft(
 		return ApprovedDraft{}, errors.New("draft recipient email is required")
 	}
 
-	contentHash, err := draftcontent.Hash(draft.RecipientEmail, draft.Subject, draft.Body)
+	contentHash, err := draftcontent.HashWithHTML(draft.RecipientEmail, draft.Subject, draft.Body, draft.BodyHTML)
 	if err != nil {
 		return ApprovedDraft{}, err
 	}

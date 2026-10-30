@@ -30,6 +30,12 @@ func RegisterTools(server *mcp.Server,
 	client *http.Client,
 	from string,
 	messageIDDomain string) {
+	RegisterAccountTools(server, pool, func(context.Context, string) (DeliveryAccount, error) {
+		return DeliveryAccount{Client: client, From: from, MessageIDDomain: messageIDDomain}, nil
+	})
+}
+
+func RegisterAccountTools(server *mcp.Server, pool *pgxpool.Pool, resolve DeliveryAccountResolver) {
 	approvalOutputSchema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -119,7 +125,11 @@ func RegisterTools(server *mcp.Server,
 		ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
 
-		entry, err := SendOutboxMessage(ctx, pool, client, input.OutboxID, from, messageIDDomain)
+		account, err := resolve(ctx, input.OutboxID)
+		if err != nil {
+			return nil, OutboxEntry{}, err
+		}
+		entry, err := SendOutboxMessage(ctx, pool, account.Client, input.OutboxID, account.From, account.MessageIDDomain)
 		if err != nil {
 			return nil, OutboxEntry{}, err
 		}
@@ -160,7 +170,10 @@ func RegisterTools(server *mcp.Server,
 		defer cancel()
 
 		cutoff := time.Now().Add(-time.Duration(input.OlderThanMinutes) * time.Minute)
-		entries, err := RecoverStaleOutboxEntries(ctx, pool, client, cutoff, input.Limit)
+		entries, err := RecoverStaleOutboxEntriesWithClients(ctx, pool, func(ctx context.Context, id string) (*http.Client, error) {
+			account, err := resolve(ctx, id)
+			return account.Client, err
+		}, cutoff, input.Limit)
 		if entries == nil {
 			entries = []OutboxEntry{}
 		}

@@ -54,6 +54,26 @@ func ApproveDraft(
 	}
 	defer tx.Rollback(ctx)
 
+	const accountQuery = `
+		SELECT acc.deletion_requested_at
+		FROM drafts AS d
+		JOIN contacts AS c ON c.id = d.contact_id
+		JOIN accounts AS acc ON acc.account_id = c.account_id
+		WHERE d.draft_id = $1 AND d.version = $2
+		FOR SHARE OF acc
+	`
+	var deletionRequestedAt *time.Time
+	err = tx.QueryRow(ctx, accountQuery, input.DraftID, input.Version).Scan(&deletionRequestedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ApprovalResult{}, errors.New("draft version not found")
+	}
+	if err != nil {
+		return ApprovalResult{}, err
+	}
+	if deletionRequestedAt != nil {
+		return ApprovalResult{}, errors.New("account is pending deletion")
+	}
+
 	existing, err := getExistingApproval(ctx, tx, input)
 	if err == nil {
 		return existing, nil

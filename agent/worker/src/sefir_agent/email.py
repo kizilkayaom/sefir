@@ -1,15 +1,22 @@
+import os
+from pathlib import Path
+
 from mcp import Client, StdioServerParameters
 from mcp.types import TextContent
 
 
-async def approve_draft(
-    approval_id: str,
-    draft_id: str,
-    version: int,
-    content_hash: str,
-    approved_by: str,
-) -> dict[str, object]:
-    server = StdioServerParameters(
+def email_server_parameters() -> StdioServerParameters:
+    environment = {
+        key: os.environ[key]
+        for key in ("DATABASE_URL", "PGPASSWORD", "SEFIR_ROOT")
+        if key in os.environ
+    }
+    executable = os.environ.get("SEFIR_EMAIL_MCP_BIN")
+    if executable:
+        environment["SEFIR_ROOT"] = environment.get("SEFIR_ROOT") or str(Path.cwd())
+        return StdioServerParameters(command=executable, env=environment)
+
+    return StdioServerParameters(
         command="uv",
         args=[
             "run",
@@ -21,9 +28,18 @@ async def approve_draft(
             "run",
             "./cmd/email-mcp",
         ],
+        env=environment,
     )
 
-    async with Client(server, mode="legacy") as client:
+
+async def approve_draft(
+    approval_id: str,
+    draft_id: str,
+    version: int,
+    content_hash: str,
+    approved_by: str,
+) -> dict[str, object]:
+    async with Client(email_server_parameters(), mode="legacy") as client:
         result = await client.call_tool(
             "approve_draft",
             {
@@ -48,21 +64,7 @@ async def approve_draft(
 
 
 async def send_outbox_message(outbox_id: str) -> dict[str, object]:
-    server = StdioServerParameters(
-        command="uv",
-        args=[
-            "run",
-            "--env-file",
-            ".env",
-            "go",
-            "-C",
-            "mcp",
-            "run",
-            "./cmd/email-mcp",
-        ],
-    )
-
-    async with Client(server, mode="legacy") as client:
+    async with Client(email_server_parameters(), mode="legacy") as client:
         result = await client.call_tool(
             "send_outbox_message",
             {"outbox_id": outbox_id},
@@ -90,21 +92,7 @@ async def recover_stale_outbox_entries(
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
 
-    server = StdioServerParameters(
-        command="uv",
-        args=[
-            "run",
-            "--env-file",
-            ".env",
-            "go",
-            "-C",
-            "mcp",
-            "run",
-            "./cmd/email-mcp",
-        ],
-    )
-
-    async with Client(server, mode="legacy") as client:
+    async with Client(email_server_parameters(), mode="legacy") as client:
         result = await client.call_tool(
             "recover_stale_outbox_entries",
             {

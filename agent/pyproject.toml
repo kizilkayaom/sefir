@@ -11,3 +11,7 @@ dev = [
 
 [tool.ruff]
 src = ["worker/src", "ingestion/src"]
+
+[tool.ruff.lint.per-file-ignores]
+"worker/tests/test_web_bridge.py" = ["S102"]
+"worker/integration_tests/test_web_approval.py" = ["S102"]

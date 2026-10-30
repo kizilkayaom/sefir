@@ -3,10 +3,9 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
-	"strings"
+	"path/filepath"
 	"time"
 
 	"github.com/kizilkayaom/sefir/mcp/internal/database"
@@ -31,41 +30,21 @@ func run() error {
 
 	defer pool.Close()
 
-	config, err := email.LoadOAuthConfig(
-		"../credentials-gmail.json",
-		"http://localhost:8080/oauth/google/callback",
-	)
+	root := os.Getenv("SEFIR_ROOT")
+	if root == "" {
+		root = ".."
+	}
+	root, err = filepath.Abs(root)
 	if err != nil {
-		return fmt.Errorf("load Gmail OAuth configuration: %w", err)
+		return err
 	}
-
-	client, err := email.NewGmailClient(context.Background(), config, "../token-gmail.json")
-	if err != nil {
-		return fmt.Errorf("create Gmail client: %w", err)
-	}
-
-	profileCtx, cancelProfile := context.WithTimeout(context.Background(), 30*time.Second)
-	profile, err := email.GetGmailProfile(profileCtx, client)
-	cancelProfile()
-	if err != nil {
-		return fmt.Errorf("get Gmail profile: %w", err)
-	}
-
-	_, messageIDDomain, ok := strings.Cut(profile.EmailAddress, "@")
-	if !ok || messageIDDomain == "" {
-		return errors.New("Gmail profile email is missing its domain")
-	}
-
-	slog.Info("Connected Gmail account", "email", profile.EmailAddress)
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "email-mcp",
 		Version: "0.1.0",
 	}, nil)
 
-	email.RegisterTools(
-		server, pool, client, profile.EmailAddress, messageIDDomain,
-	)
+	email.RegisterAccountTools(server, pool, email.WorkspaceDeliveryAccounts(pool, root))
 
 	slog.Info("Starting email MCP server")
 	return server.Run(context.Background(), &mcp.StdioTransport{})

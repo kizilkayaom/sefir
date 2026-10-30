@@ -23,9 +23,13 @@ from sefir_agent.temporal_client import (
 from sefir_agent.workflow_types import ApprovalWorkflowInput, DraftApproval
 
 
-async def run_outreach(contact_id: str, cv_text: str) -> dict[str, object]:
+async def run_outreach(
+    contact_id: str, cv_text: str, provider_id: str | None = None
+) -> dict[str, object]:
     contact = await get_confirmed_contact(contact_id=contact_id)
-    draft = await draft_outreach(contact=contact, cv_text=cv_text)
+    draft = await draft_outreach(
+        contact=contact, cv_text=cv_text, provider_id=provider_id
+    )
     return await create_draft(contact_id=contact_id, draft=draft)
 
 
@@ -73,6 +77,11 @@ def main() -> None:
         type=Path,
         required=True,
         help="Path to your UTF-8 CV text file",
+    )
+    draft_parser.add_argument(
+        "--provider",
+        choices=["cohere", "anthropic", "openai", "openrouter"],
+        help="AI provider to use instead of the server default",
     )
 
     review_parser = commands.add_parser("review", help="Review a saved draft")
@@ -289,7 +298,9 @@ def main() -> None:
     try:
         if args.command == "draft":
             cv_text = load_cv(args.cv)
-            saved_draft = asyncio.run(run_outreach(args.contact_id, cv_text))
+            saved_draft = asyncio.run(
+                run_outreach(args.contact_id, cv_text, args.provider)
+            )
         else:
             saved_draft = asyncio.run(get_draft(args.draft_id, args.version))
     except (RuntimeError, TypeError, OSError, ValueError) as exc:

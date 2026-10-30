@@ -2,7 +2,6 @@
 name = "sefir-agent"
 version = "0.1.0"
 description = "Sefir agent worker: drafts outreach emails and runs the approval workflow."
-readme = "README.md"
 license = "Apache-2.0"
 authors = [
     { name = "Ömer Kızılkaya" }

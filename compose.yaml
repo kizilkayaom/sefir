@@ -14,6 +14,108 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+  temporal:
+    image: temporalio/temporal:1.9.1
+    command:
+      - server
+      - start-dev
+      - --ip
+      - 0.0.0.0
+      - --headless
+      - --db-filename
+      - /home/temporal/temporal.db
+    volumes:
+      - temporal_data:/home/temporal
+    healthcheck:
+      test:
+        - CMD
+        - temporal
+        - operator
+        - cluster
+        - health
+        - --address
+        - 127.0.0.1:7233
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+  migrate:
+    image: sefir:local
+    build:
+      context: .
+      target: runtime
+    command:
+      - goose
+      - -env=none
+      - -dir
+      - /opt/sefir/migrations
+      - up
+    environment:
+      GOOSE_DRIVER: postgres
+      GOOSE_DBSTRING: "postgres://sefir@postgres:5432/sefir?sslmode=disable"
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+  web:
+    image: sefir:local
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - sefir_data:/data
+    environment:
+      DATABASE_URL: "postgres://sefir@postgres:5432/sefir?sslmode=disable"
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      TEMPORAL_ADDRESS: temporal:7233
+      SEFIR_WEB_ORIGIN: "http://localhost:8080"
+      SEFIR_SIGNUP_ENABLED: "false"
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      SEFIR_DEFAULT_PROVIDER: ${SEFIR_DEFAULT_PROVIDER:-}
+      SEFIR_COHERE_MODEL: ${SEFIR_COHERE_MODEL:-}
+      SEFIR_ANTHROPIC_MODEL: ${SEFIR_ANTHROPIC_MODEL:-}
+      SEFIR_OPENAI_MODEL: ${SEFIR_OPENAI_MODEL:-}
+      SEFIR_OPENROUTER_MODEL: ${SEFIR_OPENROUTER_MODEL:-}
+      SEFIR_OWNER: ${SEFIR_OWNER:-}
+      SEFIR_OWNER_PASSWORD: ${SEFIR_OWNER_PASSWORD:-}
+      SEFIR_OPERATOR_ACCOUNT_ID: ${SEFIR_OPERATOR_ACCOUNT_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+  worker:
+    image: sefir:local
+    command: ["sefir-worker"]
+    build:
+      context: .
+      target: runtime
+    volumes:
+      - sefir_data:/data
+    environment:
+      DATABASE_URL: "postgres://sefir@postgres:5432/sefir?sslmode=disable"
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  temporal_data:
+  sefir_data:

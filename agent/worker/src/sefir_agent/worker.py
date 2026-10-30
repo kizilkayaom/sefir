@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -8,7 +9,7 @@ from sefir_agent.workflows import ApprovalWorkflow
 
 
 async def run_worker() -> None:
-    client = await Client.connect("localhost:7233")
+    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "127.0.0.1:7233"))
     worker = Worker(
         client,
         task_queue="sefir-outreach",

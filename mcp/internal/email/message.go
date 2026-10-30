@@ -3,10 +3,14 @@ package email
 import (
 	"encoding/base64"
 	"errors"
+	"mime/multipart"
 	"net/mail"
+	"net/textproto"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/kizilkayaom/sefir/mcp/internal/draftcontent"
 )
 
 type MessageInput struct {
@@ -77,6 +81,33 @@ func BuildMessage(input MessageInput) ([]byte, error) {
 	builder.WriteString("Date: " + input.Date.Format(time.RFC1123Z) + "\r\n")
 	builder.WriteString("Message-ID: " + input.MessageID + "\r\n")
 	builder.WriteString("MIME-Version: 1.0\r\n")
+	if input.Draft.BodyHTML != "" {
+		_, body, safeHTML, err := draftcontent.Prepare(input.Draft.Subject, input.Draft.Body, input.Draft.BodyHTML)
+		if err != nil || body != input.Draft.Body || safeHTML != input.Draft.BodyHTML {
+			return nil, errors.New("formatted email does not match its safe text and HTML content")
+		}
+		parts := multipart.NewWriter(&builder)
+		builder.WriteString("Content-Type: multipart/alternative; boundary=\"" + parts.Boundary() + "\"\r\n\r\n")
+		for _, content := range []struct{ kind, body string }{
+			{"text/plain", input.Draft.Body},
+			{"text/html", input.Draft.BodyHTML},
+		} {
+			header := textproto.MIMEHeader{}
+			header.Set("Content-Type", content.kind+"; charset=utf-8")
+			header.Set("Content-Transfer-Encoding", "base64")
+			part, err := parts.CreatePart(header)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := part.Write([]byte(encodeMessageBody(content.body))); err != nil {
+				return nil, err
+			}
+		}
+		if err := parts.Close(); err != nil {
+			return nil, err
+		}
+		return []byte(builder.String()), nil
+	}
 	builder.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	builder.WriteString("Content-Transfer-Encoding: base64\r\n")
 	builder.WriteString("\r\n")

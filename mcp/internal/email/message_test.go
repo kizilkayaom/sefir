@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/mail"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kizilkayaom/sefir/mcp/internal/draftcontent"
 )
 
 func TestBuildMessagePreservesMessageID(t *testing.T) {
@@ -33,6 +36,52 @@ func TestBuildMessagePreservesMessageID(t *testing.T) {
 	if message.Header.Get("Message-ID") != input.MessageID {
 		t.Fatalf("Message-ID = %q, want %q",
 			message.Header.Get("Message-ID"), input.MessageID)
+	}
+}
+
+func TestBuildFormattedMessageRoundTrip(t *testing.T) {
+	recipient := "recipient@example.com"
+	subject, body, bodyHTML, err := draftcontent.Prepare("Hello", "", "<p>Hello <strong>Ömer 🌍</strong></p><ul><li>First</li><li>Second</li></ul>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := MessageInput{
+		From: "sender@example.com", MessageID: "<formatted@example.com>",
+		Date:  time.Date(2026, time.October, 28, 12, 0, 0, 0, time.UTC),
+		Draft: ApprovedDraft{RecipientEmail: &recipient, Subject: subject, Body: body, BodyHTML: bodyHTML},
+	}
+	raw, err := BuildMessage(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind, params, err := mime.ParseMediaType(message.Header.Get("Content-Type"))
+	if err != nil || kind != "multipart/alternative" || params["boundary"] == "" {
+		t.Fatalf("unexpected MIME content: %s", message.Header.Get("Content-Type"))
+	}
+	parts := multipart.NewReader(message.Body, params["boundary"])
+	for _, expected := range []struct{ kind, body string }{{"text/plain", body}, {"text/html", bodyHTML}} {
+		part, err := parts.NextPart()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if part.Header.Get("Content-Type") != expected.kind+"; charset=utf-8" || part.Header.Get("Content-Transfer-Encoding") != "base64" {
+			t.Fatal(part.Header)
+		}
+		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, part))
+		if err != nil || string(decoded) != strings.ReplaceAll(expected.body, "\n", "\r\n") {
+			t.Fatalf("formatted message content changed: %q, %v", decoded, err)
+		}
+	}
+	if _, err := parts.NextPart(); err != io.EOF {
+		t.Fatal("expected exactly two alternatives")
+	}
+	input.Draft.BodyHTML = "<p onclick=\"alert(1)\">Changed</p>"
+	if _, err := BuildMessage(input); err == nil {
+		t.Fatal("accepted unsafe content that differs from the text alternative")
 	}
 }
 

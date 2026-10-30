@@ -4,6 +4,28 @@ permissions:
   contents: read
 
 jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Lint frontend
+        run: npm run lint
+      - name: Install test browser
+        run: npx playwright install --with-deps chromium
+      - name: Build and test frontend
+        run: npm test
+
   terraform:
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +105,12 @@ jobs:
         run: uv run --locked ruff format --check .
       - name: Test Python workflows
         run: uv run --locked --package sefir-agent python -m unittest discover -s worker/tests -v
+      - name: Check Docker verification script
+        working-directory: .
+        run: |
+          uv run --project agent --locked ruff check --config agent/pyproject.toml scripts
+          uv run --project agent --locked ruff format --check --config agent/pyproject.toml scripts
+          uv run --project agent --locked python -m unittest discover -s scripts/tests -v
       - name: Install Temporal CLI
         run: |
           mkdir -p "$RUNNER_TEMP/temporal-bin"

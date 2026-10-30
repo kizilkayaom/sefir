@@ -24,7 +24,17 @@ func RecoverStaleOutboxEntries(
 	if client == nil {
 		return nil, errors.New("HTTP client is required")
 	}
+	return RecoverStaleOutboxEntriesWithClients(ctx, pool, func(context.Context, string) (*http.Client, error) {
+		return client, nil
+	}, claimedBefore, limit)
+}
 
+func RecoverStaleOutboxEntriesWithClients(ctx context.Context, pool *pgxpool.Pool,
+	clientForOutbox func(context.Context, string) (*http.Client, error), claimedBefore time.Time, limit int,
+) ([]OutboxEntry, error) {
+	if pool == nil || clientForOutbox == nil {
+		return nil, errors.New("database pool and Gmail client resolver are required")
+	}
 	entries, err := ListStaleOutboxEntries(ctx, pool, claimedBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list stale outbox entries: %w", err)
@@ -44,6 +54,11 @@ func RecoverStaleOutboxEntries(
 			continue
 		}
 
+		client, err := clientForOutbox(ctx, entry.OutboxID)
+		if err != nil || client == nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("Gmail connection unavailable for outbox %s", entry.OutboxID))
+			continue
+		}
 		gmailMessageID, found, err := FindSentGmailMessage(ctx, client, *entry.RFC822MessageID)
 		if err != nil {
 			recoveryErrors = append(recoveryErrors,
