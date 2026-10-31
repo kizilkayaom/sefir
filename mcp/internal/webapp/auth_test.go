@@ -222,3 +222,37 @@ func TestOwnerConfiguration(t *testing.T) {
 		t.Fatal("invalid legacy credentials ignored")
 	}
 }
+
+func TestInvalidateAccountSessions(t *testing.T) {
+	server := &Server{
+		sessions: map[string]session{
+			"session-a-1": {AccountID: "account-a"},
+			"session-a-2": {AccountID: "account-a"},
+			"session-b-1": {AccountID: "account-b"},
+		},
+		googleAttempts: map[string]googleAttempt{
+			"attempt-a-1": {SessionID: "session-a-1"},
+			"attempt-a-2": {SessionID: "session-a-2"},
+			"attempt-b-1": {SessionID: "session-b-1"},
+		},
+	}
+	for call := 1; call <= 2; call++ {
+		server.invalidateAccountSessions("account-a")
+		for _, id := range []string{"session-a-1", "session-a-2"} {
+			if _, exists := server.sessions[id]; exists {
+				t.Fatalf("session %s was not removed after call %d", id, call)
+			}
+		}
+		for _, id := range []string{"attempt-a-1", "attempt-a-2"} {
+			if _, exists := server.googleAttempts[id]; exists {
+				t.Fatalf("Google attempt %s was not removed after call %d", id, call)
+			}
+		}
+		if value, exists := server.sessions["session-b-1"]; !exists || value.AccountID != "account-b" {
+			t.Fatalf("account-b session was removed or changed after call %d", call)
+		}
+		if value, exists := server.googleAttempts["attempt-b-1"]; !exists || value.SessionID != "session-b-1" {
+			t.Fatalf("account-b Google attempt was removed or changed after call %d", call)
+		}
+	}
+}

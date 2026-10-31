@@ -11,12 +11,15 @@ import (
 )
 
 type memoryAccounts struct {
-	mu    sync.Mutex
-	items map[string]Account
-	err   error
+	mu                sync.Mutex
+	items             map[string]Account
+	err               error
+	deletionRequested map[string]bool
 }
 
-func newMemoryAccounts() *memoryAccounts { return &memoryAccounts{items: map[string]Account{}} }
+func newMemoryAccounts() *memoryAccounts {
+	return &memoryAccounts{items: map[string]Account{}, deletionRequested: map[string]bool{}}
+}
 
 func (a *memoryAccounts) ByID(_ context.Context, id string) (Account, error) {
 	a.mu.Lock()
@@ -24,7 +27,7 @@ func (a *memoryAccounts) ByID(_ context.Context, id string) (Account, error) {
 	if a.err != nil {
 		return Account{}, a.err
 	}
-	if account, ok := a.items[id]; ok {
+	if account, ok := a.items[id]; ok && !a.deletionRequested[id] {
 		return account, nil
 	}
 	return Account{}, pgx.ErrNoRows
@@ -37,7 +40,7 @@ func (a *memoryAccounts) ByUsername(_ context.Context, name string) (Account, er
 		return Account{}, a.err
 	}
 	for _, account := range a.items {
-		if strings.EqualFold(account.Username, strings.TrimSpace(name)) {
+		if strings.EqualFold(account.Username, strings.TrimSpace(name)) && !a.deletionRequested[account.ID] {
 			return account, nil
 		}
 	}
@@ -51,7 +54,7 @@ func (a *memoryAccounts) ByGoogleSubject(_ context.Context, subject string) (Acc
 		return Account{}, a.err
 	}
 	for _, account := range a.items {
-		if account.GoogleSubject == subject {
+		if account.GoogleSubject == subject && !a.deletionRequested[account.ID] {
 			return account, nil
 		}
 	}
@@ -86,7 +89,7 @@ func (a *memoryAccounts) Google(_ context.Context, identity GoogleIdentity) (Acc
 		return Account{}, a.err
 	}
 	for _, account := range a.items {
-		if account.GoogleSubject == identity.Subject {
+		if account.GoogleSubject == identity.Subject && !a.deletionRequested[account.ID] {
 			return account, nil
 		}
 	}
@@ -107,8 +110,8 @@ func (a *memoryAccounts) LinkGoogle(_ context.Context, id string, identity Googl
 		return Account{}, a.err
 	}
 	account, ok := a.items[id]
-	if !ok {
-		return Account{}, pgx.ErrNoRows
+	if !ok || a.deletionRequested[id] {
+		return Account{}, ErrAccountConflict
 	}
 	if account.GoogleSubject != "" && account.GoogleSubject != identity.Subject {
 		return Account{}, ErrAccountConflict
@@ -136,5 +139,21 @@ func (a *memoryAccounts) ImportLegacy(_ context.Context, owner *ownerCredentials
 		return nil
 	}
 	a.items[workspace.LegacyAccountID] = Account{ID: workspace.LegacyAccountID, ownerCredentials: *owner}
+	return nil
+}
+
+func (a *memoryAccounts) RequestDeletion(_ context.Context, accountID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.err != nil {
+		return a.err
+	}
+
+	if _, exists := a.items[accountID]; !exists {
+		return pgx.ErrNoRows
+	}
+
+	a.deletionRequested[accountID] = true
 	return nil
 }

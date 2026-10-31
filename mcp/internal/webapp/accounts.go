@@ -28,6 +28,7 @@ type Accounts interface {
 	Google(context.Context, GoogleIdentity) (Account, error)
 	LinkGoogle(context.Context, string, GoogleIdentity) (Account, error)
 	ImportLegacy(context.Context, *ownerCredentials) error
+	RequestDeletion(context.Context, string) error
 }
 
 type PostgresAccounts struct{ Pool *pgxpool.Pool }
