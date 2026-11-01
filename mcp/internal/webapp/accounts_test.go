@@ -14,6 +14,7 @@ type memoryAccounts struct {
 	mu                sync.Mutex
 	items             map[string]Account
 	err               error
+	deletionErr       error
 	deletionRequested map[string]bool
 }
 
@@ -148,6 +149,10 @@ func (a *memoryAccounts) RequestDeletion(_ context.Context, accountID string) er
 
 	if a.err != nil {
 		return a.err
+	}
+
+	if a.deletionErr != nil {
+		return a.deletionErr
 	}
 
 	if _, exists := a.items[accountID]; !exists {

@@ -162,3 +162,41 @@ func contextAccountID(ctx context.Context) (string, error) {
 	}
 	return id, nil
 }
+
+func (a PostgresAccounts) PendingDeletions(ctx context.Context, limit int) ([]string, error) {
+	if limit < 1 || limit > 100 {
+		return nil, errors.New("limit must be between 1 and 100")
+	}
+
+	query := `
+	SELECT account_id::text
+	FROM accounts
+	WHERE deletion_requested_at IS NOT NULL
+	AND NOT legacy_reserved
+	ORDER BY deletion_requested_at, account_id
+	LIMIT $1
+	`
+
+	rows, err := a.Pool.Query(ctx, query, limit)
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return ids, nil
+}

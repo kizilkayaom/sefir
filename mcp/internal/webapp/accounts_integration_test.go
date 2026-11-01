@@ -518,3 +518,65 @@ func TestPostgresLegacyImportSkipsAccountsPendingDeletion(t *testing.T) {
 		t.Fatal("legacy import changed the deletion timestamp")
 	}
 }
+
+func TestPostgresPendingDeletions(t *testing.T) {
+	pool := accountTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	accounts := PostgresAccounts{Pool: pool}
+
+	const insertAccount = `
+		INSERT INTO accounts (username, legacy_reserved, deletion_requested_at)
+		VALUES ($1, $2, $3)
+		RETURNING account_id::text
+	`
+
+	ids, err := accounts.PendingDeletions(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("expected no pending accounts, got %v", ids)
+	}
+
+	olderTime := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	var newerID, olderID, activeID, reservedID string
+	if err := pool.QueryRow(ctx, insertAccount,
+		"pending-newer", false, olderTime.Add(time.Hour)).Scan(&newerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, insertAccount,
+		"pending-older", false, olderTime).Scan(&olderID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, insertAccount,
+		"active", false, nil).Scan(&activeID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, insertAccount,
+		"reserved", true, olderTime.Add(-time.Hour)).Scan(&reservedID); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err = accounts.PendingDeletions(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != olderID || ids[1] != newerID {
+		t.Fatalf("expected pending accounts [%s %s], got %v", olderID, newerID, ids)
+	}
+
+	ids, err = accounts.PendingDeletions(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != olderID {
+		t.Fatalf("expected only oldest pending account %s, got %v", olderID, ids)
+	}
+
+	for _, limit := range []int{-1, 0, 101} {
+		if _, err := accounts.PendingDeletions(ctx, limit); err == nil {
+			t.Fatalf("invalid limit %d was accepted", limit)
+		}
+	}
+}

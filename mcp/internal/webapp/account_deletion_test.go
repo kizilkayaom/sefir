@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 )
@@ -128,5 +129,37 @@ func TestDeleteAccountRequiresSessionAndCSRF(t *testing.T) {
 				t.Fatalf("session was not preserved: %d %s", protected.Code, protected.Body.String())
 			}
 		})
+	}
+}
+
+func TestDeleteAccountHandlesStorageFailure(t *testing.T) {
+	server, _, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	accountID := server.sessions[cookie.Value].AccountID
+
+	accounts := server.accounts.(*memoryAccounts)
+	accounts.deletionErr = errors.New("database unavailable")
+	response := request(server, "DELETE", "/api/settings/account",
+		`{"confirmation":"DELETE"}`, cookie, csrf)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+	}
+
+	if _, exists := accounts.items[accountID]; !exists {
+		t.Fatal("account record was removed despite storage failure")
+	}
+
+	if accounts.deletionRequested[accountID] {
+		t.Fatal("account was marked for deletion despite storage failure")
+	}
+
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatal("failed deletion changed cookies")
+	}
+
+	protected := request(server, "GET", "/api/settings/account", "", cookie, "")
+	if protected.Code != http.StatusOK {
+		t.Fatalf("session was not preserved: %d %s",
+			protected.Code, protected.Body.String())
 	}
 }
