@@ -6,6 +6,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -199,4 +200,85 @@ func (a PostgresAccounts) PendingDeletions(ctx context.Context, limit int) ([]st
 	}
 
 	return ids, nil
+}
+
+const sendingOutboxQuery = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM outbox AS o
+		JOIN approvals AS ap ON ap.approval_id = o.approval_id
+		JOIN drafts AS d
+		ON d.draft_id = ap.draft_id AND d.version = ap.version
+		JOIN contacts AS c ON c.id = d.contact_id
+		WHERE c.account_id = $1
+		AND o.state = 'sending'
+	)
+	`
+
+func (a PostgresAccounts) HasSendingOutbox(ctx context.Context, accountID string) (bool, error) {
+	var sending bool
+	if err := a.Pool.QueryRow(ctx, sendingOutboxQuery, accountID).Scan(&sending); err != nil {
+		return false, err
+	}
+
+	return sending, nil
+}
+
+func (a PostgresAccounts) PurgeAccount(ctx context.Context, accountID string) (bool, error) {
+	tx, err := a.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var deletionRequestedAt *time.Time
+	var reserved bool
+	err = tx.QueryRow(ctx, `
+		SELECT deletion_requested_at, legacy_reserved
+		FROM accounts
+		WHERE account_id=$1
+		FOR UPDATE`, accountID).Scan(&deletionRequestedAt, &reserved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if reserved || deletionRequestedAt == nil {
+		return false, errors.New("account is not eligible for deletion")
+	}
+
+	var sending bool
+	if err := tx.QueryRow(ctx, sendingOutboxQuery, accountID).Scan(&sending); err != nil {
+		return false, err
+	}
+	if sending {
+		return false, nil
+	}
+
+	queries := []string{
+		`DELETE FROM outbox AS o
+		 USING approvals AS ap, drafts AS d, contacts AS c
+		 WHERE o.approval_id=ap.approval_id
+		   AND ap.draft_id=d.draft_id AND ap.version=d.version
+		   AND d.contact_id=c.id AND c.account_id=$1`,
+		`DELETE FROM approvals AS ap
+		 USING drafts AS d, contacts AS c
+		 WHERE ap.draft_id=d.draft_id AND ap.version=d.version
+		   AND d.contact_id=c.id AND c.account_id=$1`,
+		`DELETE FROM drafts AS d
+		 USING contacts AS c
+		 WHERE d.contact_id=c.id AND c.account_id=$1`,
+		`DELETE FROM contacts WHERE account_id=$1`,
+		`DELETE FROM accounts WHERE account_id=$1`,
+	}
+	for _, query := range queries {
+		if _, err := tx.Exec(ctx, query, accountID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }

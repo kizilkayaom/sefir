@@ -580,3 +580,115 @@ func TestPostgresPendingDeletions(t *testing.T) {
 		}
 	}
 }
+
+func TestPostgresHasSendingOutbox(t *testing.T) {
+	pool := accountTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	credentials, err := newOwner("PendingOwner", testPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := PostgresAccounts{Pool: pool}
+
+	accA, err := accounts.Create(ctx, *credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherCredentials := *credentials
+	otherCredentials.Username = "OtherOwner"
+	accB, err := accounts.Create(ctx, otherCredentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sending, err := accounts.HasSendingOutbox(ctx, accA.ID)
+	if err != nil || sending {
+		t.Fatalf("account A: expected no sending entries, got %t, error: %v", sending, err)
+	}
+
+	sending, err = accounts.HasSendingOutbox(ctx, accB.ID)
+	if err != nil || sending {
+		t.Fatalf("account B: expected no sending entries, got %t, error: %v", sending, err)
+	}
+
+	store := PostgresStore{Pool: pool}
+	createOutbox := func(account Account) string {
+		t.Helper()
+		accountCtx := withAccount(ctx, account)
+		contact, err := store.SaveContact(accountCtx, "", ContactInput{
+			Name:   account.Username + " contact",
+			Email:  "recipient@example.com",
+			Status: "confirmed",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		draft, err := store.CreateDraft(accountCtx, catalogue.CreateDraftInput{
+			ContactID: contact.ID,
+			Subject:   "Test subject",
+			Body:      "Test body",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var approvalID string
+		query := `
+		INSERT INTO approvals (draft_id, version, content_hash, approved_by)
+		VALUES ($1, $2, $3, $4)
+		RETURNING approval_id::text
+		`
+
+		if err := pool.QueryRow(accountCtx, query,
+			draft.DraftID,
+			draft.Version,
+			draft.ContentHash,
+			account.Username,
+		).Scan(&approvalID); err != nil {
+			t.Fatal(err)
+		}
+		var outboxID string
+		query = `
+		INSERT INTO outbox (approval_id)
+		VALUES ($1)
+		RETURNING outbox_id::text
+		`
+
+		if err := pool.QueryRow(accountCtx, query, approvalID).Scan(&outboxID); err != nil {
+			t.Fatal(err)
+		}
+
+		return outboxID
+	}
+
+	outboxA := createOutbox(accA)
+	outboxB := createOutbox(accB)
+
+	const updateState = "UPDATE outbox SET state = $1 WHERE outbox_id = $2"
+	if _, err := pool.Exec(ctx, updateState, "sending", outboxB); err != nil {
+		t.Fatal(err)
+	}
+	sending, err = accounts.HasSendingOutbox(ctx, accB.ID)
+	if err != nil || !sending {
+		t.Fatalf("account B: expected a sending entry, got %t, error: %v", sending, err)
+	}
+
+	for _, state := range []string{"pending", "sending", "sent", "failed", "needs_attention"} {
+		if _, err := pool.Exec(ctx, updateState, state, outboxA); err != nil {
+			t.Fatal(err)
+		}
+		want := state == "sending"
+		sending, err = accounts.HasSendingOutbox(ctx, accA.ID)
+		if err != nil || sending != want {
+			t.Fatalf("account A with state %s: expected %t, got %t, error: %v", state, want, sending, err)
+		}
+		sending, err = accounts.HasSendingOutbox(ctx, accB.ID)
+		if err != nil || !sending {
+			t.Fatalf("account B while account A is %s: expected a sending entry, got %t, error: %v", state, sending, err)
+		}
+	}
+}
