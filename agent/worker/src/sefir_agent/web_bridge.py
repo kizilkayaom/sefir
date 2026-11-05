@@ -123,5 +123,31 @@ def main() -> None:
         raise SystemExit(1) from None
 
 
+async def stop_approval_workflow(client: Client, workflow_id: str) -> None:
+    handle = client.get_workflow_handle(workflow_id)
+    try:
+        description = await handle.describe()
+        terminal = {
+            WorkflowExecutionStatus.COMPLETED,
+            WorkflowExecutionStatus.FAILED,
+            WorkflowExecutionStatus.CANCELED,
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.TIMED_OUT,
+        }
+        if description.status in terminal:
+            return
+        if description.status != WorkflowExecutionStatus.RUNNING:
+            raise RuntimeError("Unknown workflow status")
+
+        working_handle = client.get_workflow_handle(
+            workflow_id, run_id=description.run_id
+        )
+        await working_handle.terminate(reason="Account deletion requested")
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            return
+        raise
+
+
 if __name__ == "__main__":
     main()

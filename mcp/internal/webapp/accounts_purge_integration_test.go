@@ -189,3 +189,67 @@ func TestPostgresPurgeAccountRollsBackOnFailure(t *testing.T) {
 	}
 	assertPurgeAccountRows(t, ctx, pool, target, false)
 }
+
+func TestPostgresDeletionWorkflowIDs(t *testing.T) {
+	pool := accountPurgeTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	accounts := PostgresAccounts{Pool: pool}
+
+	ids, err := accounts.DeletionWorkflowIDs(ctx, testID)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("missing account workflows: %v, error: %v", ids, err)
+	}
+
+	target := seedPurgeAccount(t, ctx, pool, "target", 10, "pending")
+	other := seedPurgeAccount(t, ctx, pool, "other", 3, "pending")
+	for _, version := range []int{2, 1} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO drafts (draft_id, version, contact_id, subject, body, content_hash)
+			VALUES ($1, $2, $3, 'Test subject', 'Test body', repeat('a', 64))`, target.draftID, version, target.contactID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ids, err = accounts.DeletionWorkflowIDs(ctx, target.accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "approval-" + target.draftID + "-v"
+	want := []string{prefix + "1", prefix + "2", prefix + "10"}
+	if len(ids) != len(want) {
+		t.Fatalf("expected target workflows %v, got %v", want, ids)
+	}
+	for i, id := range want {
+		if ids[i] != id {
+			t.Fatalf("expected target workflows %v, got %v", want, ids)
+		}
+	}
+
+	ids, err = accounts.DeletionWorkflowIDs(ctx, other.accountID)
+	if err != nil || len(ids) != 1 || ids[0] != "approval-"+other.draftID+"-v3" {
+		t.Fatalf("other account workflows: %v, error: %v", ids, err)
+	}
+
+	requestedAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name      string
+		requested *time.Time
+		reserved  bool
+	}{
+		{name: "active"},
+		{name: "reserved", requested: &requestedAt, reserved: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := pool.Exec(ctx, `
+				UPDATE accounts SET deletion_requested_at=$2, legacy_reserved=$3
+				WHERE account_id=$1`, other.accountID, test.requested, test.reserved); err != nil {
+				t.Fatal(err)
+			}
+			ids, err := accounts.DeletionWorkflowIDs(ctx, other.accountID)
+			if err != nil || len(ids) != 0 {
+				t.Fatalf("ineligible account workflows: %v, error: %v", ids, err)
+			}
+		})
+	}
+}

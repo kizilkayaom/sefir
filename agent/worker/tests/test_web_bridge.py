@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
@@ -33,7 +33,7 @@ def load_bridge_functions() -> dict[str, Any]:
     }
     for filename, allowed in (
         ("workflow_types.py", {"ApprovalWorkflowInput", "DraftApproval"}),
-        ("web_bridge.py", {"workflow_status", "approve"}),
+        ("web_bridge.py", {"workflow_status", "approve", "stop_approval_workflow"}),
     ):
         tree = ast.parse((source / filename).read_text())
         tree.body = [
@@ -123,6 +123,107 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.functions["approve"](self.client, self.payload)
         self.assertEqual(result["status"], "COMPLETED")
         self.handle.signal.assert_not_awaited()
+
+    async def test_stop_approval_workflow_targets_described_run(self) -> None:
+        run_handle = MagicMock()
+        run_handle.terminate = AsyncMock()
+        self.handle.terminate = AsyncMock()
+        self.client.get_workflow_handle.side_effect = [self.handle, run_handle]
+
+        await self.functions["stop_approval_workflow"](
+            self.client, "approval-draft-test-v1"
+        )
+
+        self.handle.describe.assert_awaited_once_with()
+        self.assertEqual(
+            self.client.get_workflow_handle.call_args_list,
+            [
+                call("approval-draft-test-v1"),
+                call("approval-draft-test-v1", run_id="specific-run"),
+            ],
+        )
+        run_handle.terminate.assert_awaited_once_with(
+            reason="Account deletion requested"
+        )
+        self.handle.terminate.assert_not_awaited()
+
+    async def test_stop_approval_workflow_skips_closed_workflows(self) -> None:
+        self.handle.terminate = AsyncMock()
+        for status in (
+            WorkflowExecutionStatus.COMPLETED,
+            WorkflowExecutionStatus.FAILED,
+            WorkflowExecutionStatus.CANCELED,
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.TIMED_OUT,
+        ):
+            with self.subTest(status=status):
+                self.handle.describe.return_value.status = status
+                await self.functions["stop_approval_workflow"](
+                    self.client, "approval-draft-test-v1"
+                )
+                self.handle.terminate.assert_not_awaited()
+
+    async def test_stop_approval_workflow_ignores_missing_workflow(self) -> None:
+        self.handle.terminate = AsyncMock()
+
+        self.handle.describe.side_effect = RPCError(
+            "missing", RPCStatusCode.NOT_FOUND, b""
+        )
+        await self.functions["stop_approval_workflow"](
+            self.client, "approval-draft-test-v1"
+        )
+
+        self.handle.describe.assert_awaited_once_with()
+        self.handle.terminate.assert_not_awaited()
+
+    async def test_stop_approval_workflow_ignores_missing_run_on_termination(
+        self,
+    ) -> None:
+
+        self.handle.describe = AsyncMock(
+            return_value=SimpleNamespace(
+                run_id="specific-run", status=WorkflowExecutionStatus.RUNNING
+            )
+        )
+
+        self.handle.terminate = AsyncMock(
+            side_effect=RPCError("missing", RPCStatusCode.NOT_FOUND, b"")
+        )
+
+        await self.functions["stop_approval_workflow"](
+            self.client, "approval-draft-test-v1"
+        )
+
+        self.handle.terminate.assert_awaited_once_with(
+            reason="Account deletion requested"
+        )
+
+        self.handle.describe.assert_awaited_once_with()
+
+    async def test_stop_approval_workflow_rejects_unknown_status(self) -> None:
+        self.handle.describe.return_value.status = None
+        self.handle.terminate = AsyncMock()
+        with self.assertRaisesRegex(RuntimeError, "Unknown workflow status"):
+            await self.functions["stop_approval_workflow"](
+                self.client, "approval-draft-test-v1"
+            )
+        self.handle.terminate.assert_not_awaited()
+
+    async def test_stop_approval_workflow_propagates_rpc_errors(self) -> None:
+        for operation in ("describe", "terminate"):
+            with self.subTest(operation=operation):
+                self.handle.describe.side_effect = None
+                self.handle.terminate = AsyncMock()
+                error = RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+                if operation == "describe":
+                    self.handle.describe.side_effect = error
+                else:
+                    self.handle.terminate.side_effect = error
+                with self.assertRaises(RPCError) as caught:
+                    await self.functions["stop_approval_workflow"](
+                        self.client, "approval-draft-test-v1"
+                    )
+                self.assertIs(caught.exception, error)
 
 
 class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):

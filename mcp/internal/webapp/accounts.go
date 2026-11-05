@@ -282,3 +282,39 @@ func (a PostgresAccounts) PurgeAccount(ctx context.Context, accountID string) (b
 	}
 	return true, nil
 }
+
+func (a PostgresAccounts) DeletionWorkflowIDs(ctx context.Context, accountID string) ([]string, error) {
+	query := `
+	SELECT 'approval-' || d.draft_id::text || '-v' || d.version::text
+	FROM drafts AS d
+	JOIN contacts AS c ON c.id = d.contact_id
+	JOIN accounts AS acc ON acc.account_id = c.account_id
+	WHERE acc.account_id = $1
+	AND acc.deletion_requested_at IS NOT NULL
+	AND NOT acc.legacy_reserved
+	ORDER BY d.draft_id, d.version
+	`
+
+	rows, err := a.Pool.Query(ctx, query, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	workflowIDs := make([]string, 0)
+
+	for rows.Next() {
+		var workflowID string
+		if err := rows.Scan(&workflowID); err != nil {
+			return nil, err
+		}
+		workflowIDs = append(workflowIDs, workflowID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return workflowIDs, nil
+
+}
