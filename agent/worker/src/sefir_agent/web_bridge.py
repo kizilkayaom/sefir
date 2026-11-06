@@ -96,9 +96,16 @@ async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         except ProviderConfigurationError:
             return {"error": "provider_unavailable"}
         return draft.model_dump()
-    if action not in {"approve", "status"}:
+    if action not in {"approve", "status", "stop_approval"}:
         raise ValueError("Unknown web operation")
+    if action == "stop_approval":
+        workflow_id = payload.get("workflow_id")
+        if not isinstance(workflow_id, str) or not workflow_id.strip():
+            raise ValueError("workflow_id must be a non-empty string")
     client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "127.0.0.1:7233"))
+    if action == "stop_approval":
+        await stop_approval_workflow(client, workflow_id)
+        return {"workflow_id": workflow_id, "stopped": True}
     if action == "approve":
         return await approve(client, payload)
     return await workflow_status(client, payload["draft_id"], payload["version"])

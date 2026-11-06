@@ -225,6 +225,80 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
                     )
                 self.assertIs(caught.exception, error)
 
+    async def test_stop_approval_dispatch_calls_helper(self) -> None:
+        with (
+            patch(
+                "sefir_agent.web_bridge.Client.connect",
+                new_callable=AsyncMock,
+                return_value=self.client,
+            ) as connect,
+            patch(
+                "sefir_agent.web_bridge.stop_approval_workflow", new_callable=AsyncMock
+            ) as stop,
+        ):
+            result = await dispatch(
+                "stop_approval", {"workflow_id": "approval-draft-test-v1"}
+            )
+        connect.assert_awaited_once()
+        stop.assert_awaited_once_with(self.client, "approval-draft-test-v1")
+        self.assertEqual(
+            result,
+            {"workflow_id": "approval-draft-test-v1", "stopped": True},
+        )
+
+    async def test_stop_approval_dispatch_rejects_invalid_workflow_ids(self) -> None:
+        payloads = (
+            {},
+            {"workflow_id": None},
+            {"workflow_id": ""},
+            {"workflow_id": " \t\n"},
+            {"workflow_id": 123},
+            {"workflow_id": False},
+            {"workflow_id": []},
+            {"workflow_id": {}},
+        )
+        for payload in payloads:
+            with (
+                self.subTest(payload=payload),
+                patch(
+                    "sefir_agent.web_bridge.Client.connect",
+                    new_callable=AsyncMock,
+                    return_value=self.client,
+                ) as connect,
+                patch(
+                    "sefir_agent.web_bridge.stop_approval_workflow",
+                    new_callable=AsyncMock,
+                ) as stop,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "workflow_id must be a non-empty string"
+                ):
+                    await dispatch("stop_approval", payload)
+
+                connect.assert_not_awaited()
+                stop.assert_not_awaited()
+
+    async def test_stop_approval_dispatch_propagates_helper_errors(self) -> None:
+        error = RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+        with (
+            patch(
+                "sefir_agent.web_bridge.Client.connect",
+                new_callable=AsyncMock,
+                return_value=self.client,
+            ) as connect,
+            patch(
+                "sefir_agent.web_bridge.stop_approval_workflow",
+                new_callable=AsyncMock,
+                side_effect=error,
+            ) as stop,
+            self.assertRaises(RPCError) as caught,
+        ):
+            await dispatch("stop_approval", {"workflow_id": "approval-draft-test-v1"})
+
+        self.assertIs(caught.exception, error)
+        connect.assert_awaited_once()
+        stop.assert_awaited_once_with(self.client, "approval-draft-test-v1")
+
 
 class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_catalog_does_not_contact_a_model_or_temporal(self) -> None:

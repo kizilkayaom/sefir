@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,11 +32,17 @@ type GmailConnection struct {
 	TokenPath       string
 	RedirectURL     string
 	mu              sync.Mutex
+	disabled        bool
 }
+
+var errGmailConnectionDisabled = errors.New("gmail connection is disabled")
 
 func (g *GmailConnection) Status(ctx context.Context) GmailStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.disabled {
+		return GmailStatus{Message: "Gmail connection is disabled."}
+	}
 	config, err := email.LoadOAuthConfig(g.CredentialsPath, g.RedirectURL)
 	if err != nil {
 		return GmailStatus{Message: "Configure the Gmail OAuth credentials file on the server."}
@@ -48,10 +55,16 @@ func (g *GmailConnection) Status(ctx context.Context) GmailStatus {
 	if err != nil {
 		return GmailStatus{Message: "Gmail could not be reached or authorization expired. Try again or reconnect."}
 	}
+
 	return GmailStatus{Connected: true, Email: profile.EmailAddress}
 }
 
 func (g *GmailConnection) Start(state, verifier string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.disabled {
+		return "", errGmailConnectionDisabled
+	}
 	config, err := email.LoadOAuthConfig(g.CredentialsPath, g.RedirectURL)
 	if err != nil {
 		return "", err
@@ -62,6 +75,9 @@ func (g *GmailConnection) Start(state, verifier string) (string, error) {
 func (g *GmailConnection) Complete(ctx context.Context, code, verifier string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.disabled {
+		return errGmailConnectionDisabled
+	}
 	config, err := email.LoadOAuthConfig(g.CredentialsPath, g.RedirectURL)
 	if err != nil {
 		return err
@@ -159,4 +175,10 @@ func (s *Server) handleGmailCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/?gmail=connected#settings", http.StatusSeeOther)
+}
+
+func (g *GmailConnection) Disable() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.disabled = true
 }
