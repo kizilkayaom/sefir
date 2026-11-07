@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
@@ -23,6 +25,8 @@ def load_bridge_functions() -> dict[str, Any]:
         "Any": Any,
         "Client": Any,
         "dataclass": dataclass,
+        "WorkflowExecution": WorkflowExecution,
+        "DeleteWorkflowExecutionRequest": DeleteWorkflowExecutionRequest,
         "WorkflowExecutionStatus": WorkflowExecutionStatus,
         "WorkflowFailureError": WorkflowFailureError,
         "WorkflowIDConflictPolicy": WorkflowIDConflictPolicy,
@@ -33,7 +37,16 @@ def load_bridge_functions() -> dict[str, Any]:
     }
     for filename, allowed in (
         ("workflow_types.py", {"ApprovalWorkflowInput", "DraftApproval"}),
-        ("web_bridge.py", {"workflow_status", "approve", "stop_approval_workflow"}),
+        (
+            "web_bridge.py",
+            {
+                "workflow_status",
+                "approve",
+                "stop_approval_workflow",
+                "request_approval_run_deletion",
+                "approval_run_deleted",
+            },
+        ),
     ):
         tree = ast.parse((source / filename).read_text())
         tree.body = [
@@ -60,6 +73,8 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.client = MagicMock()
         self.client.get_workflow_handle.return_value = self.handle
         self.client.start_workflow = AsyncMock()
+        self.client.namespace = "test-namespace"
+        self.client.workflow_service.delete_workflow_execution = AsyncMock()
         self.payload = {
             "draft_id": "draft-test",
             "version": 1,
@@ -298,6 +313,366 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(caught.exception, error)
         connect.assert_awaited_once()
         stop.assert_awaited_once_with(self.client, "approval-draft-test-v1")
+
+    async def test_run_deletion_dispatch_calls_matching_helper(self) -> None:
+        payload = {"workflow_id": "approval-draft-test-v1", "run_id": "specific-run"}
+        for action, helper_result, response in (
+            ("request_approval_run_deletion", None, {"deletion_requested": True}),
+            ("approval_run_deleted", False, {"deleted": False}),
+            ("approval_run_deleted", True, {"deleted": True}),
+        ):
+            with (
+                self.subTest(action=action, helper_result=helper_result),
+                patch(
+                    "sefir_agent.web_bridge.Client.connect",
+                    new_callable=AsyncMock,
+                    return_value=self.client,
+                ) as connect,
+                patch(
+                    f"sefir_agent.web_bridge.{action}",
+                    new_callable=AsyncMock,
+                    return_value=helper_result,
+                ) as helper,
+            ):
+                result = await dispatch(action, payload)
+
+                self.assertEqual(result, {**payload, **response})
+                connect.assert_awaited_once()
+                helper.assert_awaited_once_with(
+                    self.client, payload["workflow_id"], payload["run_id"]
+                )
+                self.client.get_workflow_handle.assert_not_called()
+
+    async def test_run_deletion_dispatch_rejects_invalid_ids_before_connecting(
+        self,
+    ) -> None:
+        valid_payload = {
+            "workflow_id": "approval-draft-test-v1",
+            "run_id": "specific-run",
+        }
+        for action in ("request_approval_run_deletion", "approval_run_deleted"):
+            for field in ("workflow_id", "run_id"):
+                payloads = [
+                    {**valid_payload, field: value}
+                    for value in (None, "", " \t\n", 123, False, [], {})
+                ]
+                missing_payload = valid_payload.copy()
+                del missing_payload[field]
+                payloads.append(missing_payload)
+                for payload in payloads:
+                    with (
+                        self.subTest(action=action, field=field, payload=payload),
+                        patch(
+                            "sefir_agent.web_bridge.Client.connect",
+                            new_callable=AsyncMock,
+                            return_value=self.client,
+                        ) as connect,
+                        patch(
+                            f"sefir_agent.web_bridge.{action}",
+                            new_callable=AsyncMock,
+                        ) as helper,
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError, f"{field} must be a non-empty string"
+                        ):
+                            await dispatch(action, payload)
+
+                        connect.assert_not_awaited()
+                        helper.assert_not_awaited()
+
+    async def test_run_deletion_dispatch_propagates_helper_errors(self) -> None:
+        payload = {"workflow_id": "approval-draft-test-v1", "run_id": "specific-run"}
+        for action in ("request_approval_run_deletion", "approval_run_deleted"):
+            for error in (
+                ValueError("invalid run"),
+                RuntimeError("run is still running"),
+                RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b""),
+            ):
+                with (
+                    self.subTest(action=action, error=type(error).__name__),
+                    patch(
+                        "sefir_agent.web_bridge.Client.connect",
+                        new_callable=AsyncMock,
+                        return_value=self.client,
+                    ) as connect,
+                    patch(
+                        f"sefir_agent.web_bridge.{action}",
+                        new_callable=AsyncMock,
+                        side_effect=error,
+                    ) as helper,
+                    self.assertRaises(type(error)) as caught,
+                ):
+                    await dispatch(action, payload)
+
+                self.assertIs(caught.exception, error)
+                connect.assert_awaited_once()
+                helper.assert_awaited_once_with(
+                    self.client, payload["workflow_id"], payload["run_id"]
+                )
+
+    async def test_run_deletion_dispatch_propagates_connection_errors(self) -> None:
+        payload = {"workflow_id": "approval-draft-test-v1", "run_id": "specific-run"}
+        for action in ("request_approval_run_deletion", "approval_run_deleted"):
+            error = RuntimeError("connection failed")
+            with (
+                self.subTest(action=action),
+                patch(
+                    "sefir_agent.web_bridge.Client.connect",
+                    new_callable=AsyncMock,
+                    side_effect=error,
+                ) as connect,
+                patch(
+                    f"sefir_agent.web_bridge.{action}", new_callable=AsyncMock
+                ) as helper,
+                self.assertRaises(RuntimeError) as caught,
+            ):
+                await dispatch(action, payload)
+
+            self.assertIs(caught.exception, error)
+            connect.assert_awaited_once()
+            helper.assert_not_awaited()
+
+    async def test_request_approval_run_deletion_targets_exact_run(self) -> None:
+        workflow_id = "approval-draft-test-v1"
+        run_id = "specific-run"
+        self.handle.describe.return_value.run_id = "different-run"
+        delete = self.client.workflow_service.delete_workflow_execution
+        for status in (
+            WorkflowExecutionStatus.COMPLETED,
+            WorkflowExecutionStatus.FAILED,
+            WorkflowExecutionStatus.CANCELED,
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.TIMED_OUT,
+        ):
+            with self.subTest(status=status):
+                self.client.get_workflow_handle.reset_mock()
+                self.handle.describe.reset_mock()
+                delete.reset_mock()
+                self.handle.describe.return_value.status = status
+
+                await self.functions["request_approval_run_deletion"](
+                    self.client, workflow_id, run_id
+                )
+
+                self.client.get_workflow_handle.assert_called_once_with(
+                    workflow_id, run_id=run_id
+                )
+                self.handle.describe.assert_awaited_once_with()
+                delete.assert_awaited_once_with(
+                    DeleteWorkflowExecutionRequest(
+                        namespace="test-namespace",
+                        workflow_execution=WorkflowExecution(
+                            workflow_id=workflow_id, run_id=run_id
+                        ),
+                    )
+                )
+
+    async def test_request_approval_run_deletion_rejects_invalid_ids(self) -> None:
+        for field in ("workflow_id", "run_id"):
+            for value in (None, "", " \t\n", 123, False, [], {}):
+                with self.subTest(field=field, value=value):
+                    arguments = {
+                        "workflow_id": "approval-draft-test-v1",
+                        "run_id": "specific-run",
+                    }
+                    arguments[field] = value
+                    with self.assertRaisesRegex(
+                        ValueError, f"{field} must be a non-empty string"
+                    ):
+                        await self.functions["request_approval_run_deletion"](
+                            self.client, **arguments
+                        )
+
+                    self.client.get_workflow_handle.assert_not_called()
+                    self.handle.describe.assert_not_awaited()
+                    self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
+
+    async def test_request_approval_run_deletion_rejects_unsupported_statuses(
+        self,
+    ) -> None:
+        for status in (
+            WorkflowExecutionStatus.RUNNING,
+            WorkflowExecutionStatus.CONTINUED_AS_NEW,
+            None,
+        ):
+            with self.subTest(status=status):
+                self.handle.describe.return_value.status = status
+                with self.assertRaisesRegex(
+                    RuntimeError, "Workflow run must be closed before deletion"
+                ):
+                    await self.functions["request_approval_run_deletion"](
+                        self.client, "approval-draft-test-v1", "specific-run"
+                    )
+                self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
+
+    async def test_request_approval_run_deletion_ignores_missing_run(self) -> None:
+        self.handle.describe.side_effect = RPCError(
+            "missing", RPCStatusCode.NOT_FOUND, b""
+        )
+
+        await self.functions["request_approval_run_deletion"](
+            self.client, "approval-draft-test-v1", "specific-run"
+        )
+
+        self.handle.describe.assert_awaited_once_with()
+        self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
+
+    async def test_request_approval_run_deletion_ignores_missing_run_on_deletion(
+        self,
+    ) -> None:
+        self.handle.describe.return_value.status = WorkflowExecutionStatus.TERMINATED
+        delete = self.client.workflow_service.delete_workflow_execution
+        delete.side_effect = RPCError("missing", RPCStatusCode.NOT_FOUND, b"")
+
+        await self.functions["request_approval_run_deletion"](
+            self.client, "approval-draft-test-v1", "specific-run"
+        )
+
+        self.handle.describe.assert_awaited_once_with()
+        delete.assert_awaited_once()
+
+    async def test_request_approval_run_deletion_propagates_rpc_errors(self) -> None:
+        self.handle.describe.return_value.status = WorkflowExecutionStatus.TERMINATED
+        delete = self.client.workflow_service.delete_workflow_execution
+        for operation in ("describe", "delete"):
+            with self.subTest(operation=operation):
+                self.handle.describe.reset_mock(side_effect=True)
+                delete.reset_mock(side_effect=True)
+                error = RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+                if operation == "describe":
+                    self.handle.describe.side_effect = error
+                else:
+                    delete.side_effect = error
+
+                with self.assertRaises(RPCError) as caught:
+                    await self.functions["request_approval_run_deletion"](
+                        self.client, "approval-draft-test-v1", "specific-run"
+                    )
+
+                self.assertIs(caught.exception, error)
+                self.handle.describe.assert_awaited_once_with()
+                if operation == "describe":
+                    delete.assert_not_awaited()
+                else:
+                    delete.assert_awaited_once()
+
+    async def test_approval_run_deleted_reports_existing_run(self) -> None:
+        result = await self.functions["approval_run_deleted"](
+            self.client, "approval-draft-test-v1", "specific-run"
+        )
+
+        self.assertIs(result, False)
+        self.client.get_workflow_handle.assert_called_once_with(
+            "approval-draft-test-v1", run_id="specific-run"
+        )
+        self.handle.describe.assert_awaited_once_with()
+        self.handle.fetch_history_events.assert_not_called()
+        self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
+
+    async def test_approval_run_deleted_requires_missing_execution_and_history(
+        self,
+    ) -> None:
+        self.handle.describe.side_effect = RPCError(
+            "missing", RPCStatusCode.NOT_FOUND, b""
+        )
+        events = MagicMock()
+        events.__anext__ = AsyncMock(
+            side_effect=RPCError("missing history", RPCStatusCode.NOT_FOUND, b"")
+        )
+        self.handle.fetch_history_events.return_value = events
+
+        result = await self.functions["approval_run_deleted"](
+            self.client, "approval-draft-test-v1", "specific-run"
+        )
+
+        self.assertIs(result, True)
+        self.client.get_workflow_handle.assert_called_once_with(
+            "approval-draft-test-v1", run_id="specific-run"
+        )
+        self.handle.describe.assert_awaited_once_with()
+        self.handle.fetch_history_events.assert_called_once_with(page_size=1)
+        events.__anext__.assert_awaited_once_with()
+        self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
+
+    async def test_approval_run_deleted_retains_accessible_history(self) -> None:
+        self.handle.describe.side_effect = RPCError(
+            "missing", RPCStatusCode.NOT_FOUND, b""
+        )
+        for name, outcome in (
+            ("event exists", SimpleNamespace(event_id=1)),
+            ("empty history", StopAsyncIteration()),
+        ):
+            with self.subTest(name=name):
+                self.handle.describe.reset_mock()
+                self.handle.fetch_history_events.reset_mock()
+                events = MagicMock()
+                events.__anext__ = AsyncMock(side_effect=[outcome])
+                self.handle.fetch_history_events.return_value = events
+
+                result = await self.functions["approval_run_deleted"](
+                    self.client, "approval-draft-test-v1", "specific-run"
+                )
+
+                self.assertIs(result, False)
+                self.handle.describe.assert_awaited_once_with()
+                self.handle.fetch_history_events.assert_called_once_with(page_size=1)
+                events.__anext__.assert_awaited_once_with()
+                self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
+
+    async def test_approval_run_deleted_propagates_rpc_errors(self) -> None:
+        for operation in ("describe", "history"):
+            for status in (RPCStatusCode.UNAVAILABLE, RPCStatusCode.PERMISSION_DENIED):
+                with self.subTest(operation=operation, status=status):
+                    self.handle.describe.reset_mock(side_effect=True)
+                    self.handle.fetch_history_events.reset_mock()
+                    error = RPCError("lookup failed", status, b"")
+                    events = MagicMock()
+                    events.__anext__ = AsyncMock(side_effect=error)
+                    self.handle.fetch_history_events.return_value = events
+                    if operation == "describe":
+                        self.handle.describe.side_effect = error
+                    else:
+                        self.handle.describe.side_effect = RPCError(
+                            "missing", RPCStatusCode.NOT_FOUND, b""
+                        )
+
+                    with self.assertRaises(RPCError) as caught:
+                        await self.functions["approval_run_deleted"](
+                            self.client, "approval-draft-test-v1", "specific-run"
+                        )
+
+                    self.assertIs(caught.exception, error)
+                    self.handle.describe.assert_awaited_once_with()
+                    if operation == "describe":
+                        self.handle.fetch_history_events.assert_not_called()
+                        events.__anext__.assert_not_awaited()
+                    else:
+                        self.handle.fetch_history_events.assert_called_once_with(
+                            page_size=1
+                        )
+                        events.__anext__.assert_awaited_once_with()
+                    self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
+
+    async def test_approval_run_deleted_rejects_invalid_ids(self) -> None:
+        for field in ("workflow_id", "run_id"):
+            for value in (None, "", " \t\n", 123, False, [], {}):
+                with self.subTest(field=field, value=value):
+                    arguments = {
+                        "workflow_id": "approval-draft-test-v1",
+                        "run_id": "specific-run",
+                    }
+                    arguments[field] = value
+                    with self.assertRaisesRegex(
+                        ValueError, f"{field} must be a non-empty string"
+                    ):
+                        await self.functions["approval_run_deleted"](
+                            self.client, **arguments
+                        )
+
+                    self.client.get_workflow_handle.assert_not_called()
+                    self.handle.describe.assert_not_awaited()
+                    self.handle.fetch_history_events.assert_not_called()
+                    self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
 
 
 class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):

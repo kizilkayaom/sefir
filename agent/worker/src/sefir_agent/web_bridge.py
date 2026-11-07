@@ -5,6 +5,8 @@ import sys
 from contextlib import redirect_stdout
 from typing import Any
 
+from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -96,16 +98,40 @@ async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         except ProviderConfigurationError:
             return {"error": "provider_unavailable"}
         return draft.model_dump()
-    if action not in {"approve", "status", "stop_approval"}:
+    if action not in {
+        "approve",
+        "status",
+        "stop_approval",
+        "request_approval_run_deletion",
+        "approval_run_deleted",
+    }:
         raise ValueError("Unknown web operation")
-    if action == "stop_approval":
+    if action in {
+        "stop_approval",
+        "request_approval_run_deletion",
+        "approval_run_deleted",
+    }:
         workflow_id = payload.get("workflow_id")
         if not isinstance(workflow_id, str) or not workflow_id.strip():
             raise ValueError("workflow_id must be a non-empty string")
+    if action in {"request_approval_run_deletion", "approval_run_deleted"}:
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must be a non-empty string")
     client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "127.0.0.1:7233"))
     if action == "stop_approval":
         await stop_approval_workflow(client, workflow_id)
         return {"workflow_id": workflow_id, "stopped": True}
+    if action == "request_approval_run_deletion":
+        await request_approval_run_deletion(client, workflow_id, run_id)
+        return {
+            "workflow_id": workflow_id,
+            "run_id": run_id,
+            "deletion_requested": True,
+        }
+    if action == "approval_run_deleted":
+        deleted = await approval_run_deleted(client, workflow_id, run_id)
+        return {"workflow_id": workflow_id, "run_id": run_id, "deleted": deleted}
     if action == "approve":
         return await approve(client, payload)
     return await workflow_status(client, payload["draft_id"], payload["version"])
@@ -154,6 +180,66 @@ async def stop_approval_workflow(client: Client, workflow_id: str) -> None:
         if exc.status == RPCStatusCode.NOT_FOUND:
             return
         raise
+
+
+async def request_approval_run_deletion(
+    client: Client, workflow_id: str, run_id: str
+) -> None:
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        raise ValueError("workflow_id must be a non-empty string")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("run_id must be a non-empty string")
+
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+    try:
+        description = await handle.describe()
+        terminal = {
+            WorkflowExecutionStatus.COMPLETED,
+            WorkflowExecutionStatus.FAILED,
+            WorkflowExecutionStatus.CANCELED,
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.TIMED_OUT,
+        }
+        if description.status not in terminal:
+            raise RuntimeError("Workflow run must be closed before deletion")
+
+        await client.workflow_service.delete_workflow_execution(
+            DeleteWorkflowExecutionRequest(
+                namespace=client.namespace,
+                workflow_execution=WorkflowExecution(
+                    workflow_id=workflow_id, run_id=run_id
+                ),
+            )
+        )
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            return
+        raise
+
+
+async def approval_run_deleted(client: Client, workflow_id: str, run_id: str) -> bool:
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        raise ValueError("workflow_id must be a non-empty string")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("run_id must be a non-empty string")
+
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+    try:
+        await handle.describe()
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+    else:
+        return False
+
+    try:
+        events = handle.fetch_history_events(page_size=1)
+        await anext(events, None)
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            return True
+        raise
+    return False
 
 
 if __name__ == "__main__":

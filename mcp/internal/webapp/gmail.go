@@ -182,3 +182,22 @@ func (g *GmailConnection) Disable() {
 	defer g.mu.Unlock()
 	g.disabled = true
 }
+
+func (g *GmailConnection) RemoveToken() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.disabled = true
+
+	if g.TokenPath == "" {
+		return errors.New("gmail token path is required")
+	}
+
+	err := os.Remove(g.TokenPath)
+
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else {
+		return err
+	}
+}

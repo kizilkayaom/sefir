@@ -50,7 +50,7 @@ func run() error {
 		slog.Info("Google sign-in is unavailable; configure credentials-gmail.json to enable it")
 	}
 	var gmailConnections sync.Map
-	config.GmailForAccount = func(accountID string) (webapp.Gmail, error) {
+	getGmailConnection := func(accountID string) (*webapp.GmailConnection, error) {
 		tokenPath, err := workspace.GmailTokenPath(root, accountID)
 		if err != nil {
 			return nil, err
@@ -60,6 +60,9 @@ func run() error {
 			TokenPath:       tokenPath, RedirectURL: origin + "/oauth/google/callback",
 		})
 		return connection.(*webapp.GmailConnection), nil
+	}
+	config.GmailForAccount = func(accountID string) (webapp.Gmail, error) {
+		return getGmailConnection(accountID)
 	}
 	bridge := webapp.PythonBridge{
 		Python: env("SEFIR_PYTHON", filepath.Join(root, "agent", ".venv", "bin", "python")),
