@@ -40,7 +40,7 @@ func accountTestPool(t *testing.T) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	for _, table := range []string{"accounts", "contacts", "drafts", "approvals", "outbox"} {
+	for _, table := range []string{"accounts", "contacts", "drafts", "approvals", "outbox", "account_deletion_runs"} {
 		if _, err := pool.Exec(ctx, "CREATE TEMP TABLE "+table+" (LIKE public."+table+" INCLUDING ALL)"); err != nil {
 			t.Fatal(err)
 		}

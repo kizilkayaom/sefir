@@ -21,6 +21,11 @@ type Account struct {
 	ownerCredentials
 }
 
+type DeletionRun struct {
+	WorkflowID string
+	RunID      string
+}
+
 type Accounts interface {
 	ByID(context.Context, string) (Account, error)
 	ByUsername(context.Context, string) (Account, error)
@@ -317,4 +322,78 @@ func (a PostgresAccounts) DeletionWorkflowIDs(ctx context.Context, accountID str
 
 	return workflowIDs, nil
 
+}
+
+func (a PostgresAccounts) SaveDeletionRun(ctx context.Context, accountID, workflowID, runID string) error {
+	if !uuidPattern.MatchString(accountID) {
+		return errors.New("invalid account ID")
+	}
+	if strings.TrimSpace(workflowID) == "" {
+		return errors.New("workflow ID is required")
+	}
+	if strings.TrimSpace(runID) == "" {
+		return errors.New("run ID is required")
+	}
+
+	tx, err := a.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var found int
+	err = tx.QueryRow(ctx, `
+		SELECT 1
+		FROM drafts AS d
+		JOIN contacts AS c ON c.id = d.contact_id
+		JOIN accounts AS acc ON acc.account_id = c.account_id
+		WHERE acc.account_id = $1
+		AND acc.deletion_requested_at IS NOT NULL
+		AND NOT acc.legacy_reserved
+		AND ('approval-' || d.draft_id::text || '-v' || d.version::text) = $2
+		FOR SHARE OF acc`, accountID, workflowID).Scan(&found)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO account_deletion_runs (account_id, workflow_id, run_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (account_id, workflow_id, run_id) DO NOTHING`, accountID, workflowID, runID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (a PostgresAccounts) DeletionRuns(ctx context.Context, accountID string) ([]DeletionRun, error) {
+	if !uuidPattern.MatchString(accountID) {
+		return nil, errors.New("invalid account ID")
+	}
+
+	rows, err := a.Pool.Query(ctx, `
+		SELECT r.workflow_id, r.run_id
+		FROM account_deletion_runs AS r
+		JOIN accounts AS acc ON acc.account_id = r.account_id
+		WHERE acc.account_id = $1
+		AND acc.deletion_requested_at IS NOT NULL
+		AND NOT acc.legacy_reserved
+		ORDER BY r.workflow_id, r.run_id`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	runs := make([]DeletionRun, 0)
+	for rows.Next() {
+		var run DeletionRun
+		if err := rows.Scan(&run.WorkflowID, &run.RunID); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
 }

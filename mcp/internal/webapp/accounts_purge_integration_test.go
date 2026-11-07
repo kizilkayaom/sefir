@@ -3,9 +3,11 @@ package webapp
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -20,6 +22,7 @@ func accountPurgeTestPool(t *testing.T) *pgxpool.Pool {
 		"ALTER TABLE pg_temp.drafts ADD FOREIGN KEY (contact_id) REFERENCES pg_temp.contacts(id)",
 		"ALTER TABLE pg_temp.approvals ADD FOREIGN KEY (draft_id, version) REFERENCES pg_temp.drafts(draft_id, version)",
 		"ALTER TABLE pg_temp.outbox ADD FOREIGN KEY (approval_id) REFERENCES pg_temp.approvals(approval_id)",
+		"ALTER TABLE pg_temp.account_deletion_runs ADD FOREIGN KEY (account_id) REFERENCES pg_temp.accounts(account_id) ON DELETE CASCADE",
 	} {
 		if _, err := pool.Exec(ctx, query); err != nil {
 			t.Fatal(err)
@@ -251,5 +254,266 @@ func TestPostgresDeletionWorkflowIDs(t *testing.T) {
 				t.Fatalf("ineligible account workflows: %v, error: %v", ids, err)
 			}
 		})
+	}
+}
+
+func TestPostgresSaveDeletionRunRejectsInvalidIDs(t *testing.T) {
+	accounts := PostgresAccounts{}
+	workflowID := "approval-" + testID + "-v1"
+	for _, tc := range []struct {
+		name       string
+		accountID  string
+		workflowID string
+		runID      string
+	}{
+		{name: "empty account", workflowID: workflowID, runID: "run-one"},
+		{name: "invalid account", accountID: "invalid-uuid", workflowID: workflowID, runID: "run-one"},
+		{name: "empty workflow", accountID: testID, runID: "run-one"},
+		{name: "blank workflow", accountID: testID, workflowID: " \t\n", runID: "run-one"},
+		{name: "empty run", accountID: testID, workflowID: workflowID},
+		{name: "blank run", accountID: testID, workflowID: workflowID, runID: " \t\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := accounts.SaveDeletionRun(context.Background(), tc.accountID, tc.workflowID, tc.runID); err == nil {
+				t.Fatal("expected invalid ID error")
+			}
+		})
+	}
+}
+
+func TestPostgresSaveDeletionRunPreservesRunsAcrossRetries(t *testing.T) {
+	pool := accountPurgeTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	accounts := PostgresAccounts{Pool: pool}
+	target := seedPurgeAccount(t, ctx, pool, "target", 1, "pending")
+	other := seedPurgeAccount(t, ctx, pool, "other", 2, "pending")
+	workflowID := "approval-" + target.draftID + "-v1"
+	otherWorkflowID := "approval-" + other.draftID + "-v2"
+
+	for _, runID := range []string{"run-one", "run-one", "run-two"} {
+		if err := accounts.SaveDeletionRun(ctx, target.accountID, workflowID, runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := accounts.SaveDeletionRun(ctx, other.accountID, otherWorkflowID, "run-one"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		accountID  string
+		workflowID string
+		runID      string
+	}{
+		{target.accountID, workflowID, "run-one"},
+		{target.accountID, workflowID, "run-two"},
+		{other.accountID, otherWorkflowID, "run-one"},
+	} {
+		var count int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM account_deletion_runs
+			WHERE account_id=$1 AND workflow_id=$2 AND run_id=$3`, tc.accountID, tc.workflowID, tc.runID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("expected one saved row for %s/%s/%s, got %d", tc.accountID, tc.workflowID, tc.runID, count)
+		}
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM account_deletion_runs").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("expected three saved runs, got %d", count)
+	}
+}
+
+func TestPostgresSaveDeletionRunRejectsIneligibleWorkflows(t *testing.T) {
+	pool := accountPurgeTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	accounts := PostgresAccounts{Pool: pool}
+	target := seedPurgeAccount(t, ctx, pool, "target", 1, "pending")
+	other := seedPurgeAccount(t, ctx, pool, "other", 2, "pending")
+	workflowID := "approval-" + target.draftID + "-v1"
+	for _, tc := range []struct {
+		name       string
+		accountID  string
+		workflowID string
+		active     bool
+		reserved   bool
+	}{
+		{name: "active account", accountID: target.accountID, workflowID: workflowID, active: true},
+		{name: "reserved account", accountID: target.accountID, workflowID: workflowID, reserved: true},
+		{name: "missing account", accountID: testID, workflowID: workflowID},
+		{name: "another account", accountID: other.accountID, workflowID: workflowID},
+		{name: "another account draft version", accountID: target.accountID, workflowID: "approval-" + target.draftID + "-v2"},
+		{name: "missing draft version", accountID: target.accountID, workflowID: "approval-" + target.draftID + "-v999"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := pool.Exec(ctx, `
+				UPDATE accounts
+				SET deletion_requested_at=CASE WHEN $2 THEN NULL ELSE now() END,
+				    legacy_reserved=$3
+				WHERE account_id=$1`, target.accountID, tc.active, tc.reserved); err != nil {
+				t.Fatal(err)
+			}
+			if err := accounts.SaveDeletionRun(ctx, tc.accountID, tc.workflowID, "run-one"); !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("expected no eligible workflow, got %v", err)
+			}
+			var count int
+			if err := pool.QueryRow(ctx, "SELECT count(*) FROM account_deletion_runs").Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("ineligible workflow created %d tracking rows", count)
+			}
+		})
+	}
+}
+
+func TestPostgresSaveDeletionRunRollsBackOnFailure(t *testing.T) {
+	pool := accountPurgeTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	accounts := PostgresAccounts{Pool: pool}
+	target := seedPurgeAccount(t, ctx, pool, "target", 1, "pending")
+	workflowID := "approval-" + target.draftID + "-v1"
+	if _, err := pool.Exec(ctx, `
+		ALTER TABLE pg_temp.account_deletion_runs
+		ADD CHECK (run_id <> 'blocked-run')`); err != nil {
+		t.Fatal(err)
+	}
+	err := accounts.SaveDeletionRun(ctx, target.accountID, workflowID, "blocked-run")
+	var constraint *pgconn.PgError
+	if !errors.As(err, &constraint) || constraint.Code != "23514" {
+		t.Fatalf("expected check constraint failure, got %v", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM account_deletion_runs").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("failed save left %d tracking rows", count)
+	}
+	if err := accounts.SaveDeletionRun(ctx, target.accountID, workflowID, "valid-run"); err != nil {
+		t.Fatalf("save after rollback failed: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM account_deletion_runs
+		WHERE account_id=$1 AND workflow_id=$2 AND run_id='valid-run'`, target.accountID, workflowID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one committed run after retry, got %d", count)
+	}
+}
+
+func TestPostgresDeletionRunsRejectsInvalidAccountIDs(t *testing.T) {
+	accounts := PostgresAccounts{}
+	for _, accountID := range []string{"", "invalid-uuid", " \t\n", testID + " "} {
+		t.Run(accountID, func(t *testing.T) {
+			runs, err := accounts.DeletionRuns(context.Background(), accountID)
+			if err == nil || runs != nil {
+				t.Fatalf("expected invalid account ID error, got %v, error: %v", runs, err)
+			}
+		})
+	}
+}
+
+func TestPostgresDeletionRuns(t *testing.T) {
+	pool := accountPurgeTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	accounts := PostgresAccounts{Pool: pool}
+
+	runs, err := accounts.DeletionRuns(ctx, testID)
+	if err != nil || runs == nil || len(runs) != 0 {
+		t.Fatalf("missing account runs: %v, error: %v", runs, err)
+	}
+
+	const insertAccount = `
+		INSERT INTO accounts (username, deletion_requested_at)
+		VALUES ($1, now()) RETURNING account_id::text
+	`
+	var targetID, otherID string
+	if err := pool.QueryRow(ctx, insertAccount, "target").Scan(&targetID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, insertAccount, "other").Scan(&otherID); err != nil {
+		t.Fatal(err)
+	}
+	runs, err = accounts.DeletionRuns(ctx, targetID)
+	if err != nil || runs == nil || len(runs) != 0 {
+		t.Fatalf("account with no saved runs: %v, error: %v", runs, err)
+	}
+
+	firstWorkflowID := "approval-" + testID + "-v1"
+	secondWorkflowID := "approval-" + testID + "-v2"
+	const insertRun = `
+		INSERT INTO account_deletion_runs (account_id, workflow_id, run_id)
+		VALUES ($1, $2, $3)
+	`
+	for _, run := range []DeletionRun{
+		{WorkflowID: secondWorkflowID, RunID: "run-two"},
+		{WorkflowID: firstWorkflowID, RunID: "run-two"},
+		{WorkflowID: secondWorkflowID, RunID: "run-one"},
+		{WorkflowID: firstWorkflowID, RunID: "run-one"},
+	} {
+		if _, err := pool.Exec(ctx, insertRun, targetID, run.WorkflowID, run.RunID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherRun := DeletionRun{WorkflowID: firstWorkflowID, RunID: "other-run"}
+	if _, err := pool.Exec(ctx, insertRun, otherID, otherRun.WorkflowID, otherRun.RunID); err != nil {
+		t.Fatal(err)
+	}
+	want := []DeletionRun{
+		{WorkflowID: firstWorkflowID, RunID: "run-one"},
+		{WorkflowID: firstWorkflowID, RunID: "run-two"},
+		{WorkflowID: secondWorkflowID, RunID: "run-one"},
+		{WorkflowID: secondWorkflowID, RunID: "run-two"},
+	}
+	runs, err = accounts.DeletionRuns(ctx, targetID)
+	if err != nil || !slices.Equal(runs, want) {
+		t.Fatalf("expected saved runs %v, got %v, error: %v", want, runs, err)
+	}
+	runs, err = accounts.DeletionRuns(ctx, otherID)
+	if err != nil || !slices.Equal(runs, []DeletionRun{otherRun}) {
+		t.Fatalf("other account runs: %v, error: %v", runs, err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		active   bool
+		reserved bool
+	}{
+		{name: "active", active: true},
+		{name: "reserved", reserved: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := pool.Exec(ctx, `
+				UPDATE accounts
+				SET deletion_requested_at=CASE WHEN $2 THEN NULL ELSE now() END,
+				    legacy_reserved=$3
+				WHERE account_id=$1`, targetID, tc.active, tc.reserved); err != nil {
+				t.Fatal(err)
+			}
+			runs, err := accounts.DeletionRuns(ctx, targetID)
+			if err != nil || runs == nil || len(runs) != 0 {
+				t.Fatalf("ineligible account runs: %v, error: %v", runs, err)
+			}
+			runs, err = accounts.DeletionRuns(ctx, otherID)
+			if err != nil || !slices.Equal(runs, []DeletionRun{otherRun}) {
+				t.Fatalf("other account runs changed: %v, error: %v", runs, err)
+			}
+		})
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM account_deletion_runs WHERE account_id=$1", targetID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != len(want) {
+		t.Fatalf("expected saved runs to be retained, got %d", count)
 	}
 }
