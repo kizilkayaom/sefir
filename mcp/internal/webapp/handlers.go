@@ -109,6 +109,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		ContactID string `json:"contact_id"`
 		CVText    string `json:"cv_text"`
 		Provider  string `json:"provider"`
+		PresetID  string `json:"preset_id"`
 	}
 	if !decode(w, r, &input) {
 		return
@@ -121,6 +122,15 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	case "", "cohere", "anthropic", "openai", "openrouter":
 	default:
 		fail(w, http.StatusUnprocessableEntity, "Choose a supported AI provider")
+		return
+	}
+	if input.PresetID == "" {
+		input.PresetID = "prof"
+	}
+	switch input.PresetID {
+	case "prof", "warm_prof", "technical", "formal":
+	default:
+		fail(w, http.StatusUnprocessableEntity, "Choose a supported writing style")
 		return
 	}
 	select {
@@ -143,6 +153,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.bridge.Call(ctx, "generate", map[string]any{
 		"contact": contact, "cv_text": input.CVText, "provider": input.Provider,
+		"preset_id": input.PresetID,
 	})
 	if err != nil {
 		fail(w, http.StatusBadGateway, "Draft generation failed. Check the selected AI provider's key, model access, and usage limits, then try again.")

@@ -1054,7 +1054,34 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result, draft)
         generate.assert_awaited_once_with(
-            {"name": "Alex Example"}, "Fictional resume", "anthropic"
+            {"name": "Alex Example"},
+            "Fictional resume",
+            "anthropic",
+            preset_id=None,
+        )
+
+    async def test_generate_passes_preset_to_drafting(self) -> None:
+        draft = {"subject": "Hello", "body": "A fictional introduction."}
+        generate = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: draft))
+        with patch.dict(
+            sys.modules,
+            {"sefir_agent.drafting": SimpleNamespace(draft_outreach=generate)},
+        ):
+            result = await dispatch(
+                "generate",
+                {
+                    "contact": {"name": "Alex Example"},
+                    "cv_text": "Fictional resume",
+                    "provider": "anthropic",
+                    "preset_id": "formal",
+                },
+            )
+        self.assertEqual(result, draft)
+        generate.assert_awaited_once_with(
+            {"name": "Alex Example"},
+            "Fictional resume",
+            "anthropic",
+            preset_id="formal",
         )
 
     async def test_provider_configuration_errors_are_sanitized(self) -> None:

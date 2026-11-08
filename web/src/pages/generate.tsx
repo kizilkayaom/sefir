@@ -18,6 +18,7 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
   const contacts = useResource<Page<Contact>>(`/api/contacts?limit=25&offset=${offset}`)
   const ai = useResource<AISettings>('/api/settings/ai')
   const [provider, setProvider] = useState('')
+  const [presetID, setPresetID] = useState('prof')
   const providerID = provider || ai.data?.default_provider || ''
   const selectedProvider = ai.data?.providers.find((item) => item.id === providerID)
   const [cv, setCV] = useState('')
@@ -39,7 +40,7 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
       const draft = await api<Draft>(mode === 'generate' ? '/api/drafts' : '/api/drafts/manual', {
         method: 'POST',
         body: JSON.stringify(mode === 'generate'
-          ? { contact_id: selected.id, cv_text: cv, provider: selectedProvider?.id }
+          ? { contact_id: selected.id, cv_text: cv, provider: selectedProvider?.id, preset_id: presetID }
           : { contact_id: selected.id, subject, body: content.text, body_html: content.html }),
       })
       setCV('')
@@ -86,6 +87,15 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
               <p id="provider-data-notice" className="mt-2 text-sm leading-6 text-muted-foreground">{selectedProvider ? `Generating this draft sends your résumé text and selected contact's details to ${selectedProvider.name}.` : 'Choose which provider receives your résumé text and contact details.'}</p>
               {selectedProvider?.id === 'openrouter' && <p className="mt-2 text-sm leading-6 text-muted-foreground">OpenRouter forwards this information to the provider serving your selected model.</p>}
             </div>}
+            <div>
+              <label htmlFor="draft-preset" className="block text-sm font-medium">Writing style</label>
+              <select id="draft-preset" className="field mt-2" required disabled={busy} value={presetID} onChange={(event) => { setPresetID(event.target.value); setError('') }}>
+                <option value="prof">Concise professional</option>
+                <option value="warm_prof">Warm professional</option>
+                <option value="technical">Technical and direct</option>
+                <option value="formal">Formal</option>
+              </select>
+            </div>
             <label className="block text-sm font-medium">Résumé text
               <textarea className="field mt-2 min-h-64" required maxLength={100000} disabled={busy} value={cv} onChange={(event) => setCV(event.target.value)} placeholder="Paste your résumé as plain text." />
             </label>

@@ -96,7 +96,10 @@ async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
 
         try:
             draft = await draft_outreach(
-                payload["contact"], payload["cv_text"], payload.get("provider")
+                payload["contact"],
+                payload["cv_text"],
+                payload.get("provider"),
+                preset_id=payload.get("preset_id"),
             )
         except ProviderConfigurationError:
             return {"error": "provider_unavailable"}

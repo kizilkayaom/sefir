@@ -136,6 +136,76 @@ func TestGenerationUsesSelectedProvider(t *testing.T) {
 	}
 }
 
+func TestGenerationUsesSelectedPreset(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{name: "professional", extra: `,"preset_id":"prof"`, want: "prof"},
+		{name: "warm professional", extra: `,"preset_id":"warm_prof"`, want: "warm_prof"},
+		{name: "technical", extra: `,"preset_id":"technical"`, want: "technical"},
+		{name: "formal", extra: `,"preset_id":"formal"`, want: "formal"},
+		{name: "omitted", want: "prof"},
+		{name: "empty", extra: `,"preset_id":""`, want: "prof"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, store, bridge, _ := fixture(t)
+			cookie, csrf := login(t, server)
+			bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body"}`)
+			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","provider":"anthropic"` + test.extra + `}`
+			response := request(server, "POST", "/api/drafts", body, cookie, csrf)
+			if response.Code != 201 {
+				t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+			}
+			if len(bridge.calls) != 1 || bridge.calls[0] != "generate" {
+				t.Fatal("draft generation was not called exactly once")
+			}
+			if got := bridge.payloads[0].(map[string]any)["preset_id"]; got != test.want {
+				t.Fatalf("forwarded preset: got %v, want %q", got, test.want)
+			}
+			if store.draftInput.ContactID != testID || store.draftInput.Subject != "Hello" || store.draftInput.Body != "Test body" {
+				t.Fatal("generated draft was not saved")
+			}
+		})
+	}
+}
+
+func TestGenerationRejectsUnsupportedPresets(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		busy bool
+	}{
+		{name: "available"},
+		{name: "already generating", busy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, store, bridge, _ := fixture(t)
+			cookie, csrf := login(t, server)
+			if test.busy {
+				server.generating <- struct{}{}
+			}
+			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","preset_id":"unknown"}`
+			response := request(server, "POST", "/api/drafts", body, cookie, csrf)
+			if response.Code != 422 {
+				t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+			}
+			var result struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Error != "Choose a supported writing style" {
+				t.Fatalf("unexpected error: %q", result.Error)
+			}
+			if len(bridge.calls) != 0 || store.draftInput.ContactID != "" {
+				t.Fatal("invalid preset reached generation or saved a draft")
+			}
+		})
+	}
+}
+
 func TestGenerationRejectsUnsupportedProvidersAndClientKeys(t *testing.T) {
 	for _, extra := range []string{`,"provider":"unknown"`, `,"api_key":"private-test-value"`, `,"model":"custom-model"`} {
 		server, store, bridge, _ := fixture(t)
