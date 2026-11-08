@@ -43,6 +43,7 @@ function App() {
   const [createdDraft, setCreatedDraft] = useState<Draft | null>(null)
   const [error, setError] = useState('')
   const [loggingOut, setLoggingOut] = useState(false)
+  const [deletionRequested, setDeletionRequested] = useState(false)
 
   useEffect(() => {
     if (initialSession.data) {
@@ -100,6 +101,13 @@ function App() {
       </main>
     )
   }
+  if (deletionRequested) return (
+    <main className="mx-auto max-w-lg space-y-4 px-6 py-20">
+      <h1 className="text-3xl font-semibold">Account deletion requested</h1>
+      <p role="status">You have been signed out. Your workspace is no longer accessible. Deletion continues in the background, including after server restarts.</p>
+      <Button onClick={() => { setDeletionRequested(false); window.location.hash = 'home' }}>Back to home</Button>
+    </main>
+  )
   if (page === 'home' || page === 'how-it-works' || page === 'self-host' || (!session.authenticated && page === '')) {
     return <LandingPage session={{ ...session, google_available: googleAvailable, password_available: passwordAvailable, signup_available: signupAvailable }} />
   }
@@ -137,7 +145,15 @@ function App() {
         {tab === 'contacts' && <ContactsPage onDraft={(selected) => { setContact(selected); window.location.hash = 'new' }} />}
         {tab === 'new' && <GeneratePage key={contact?.id ?? 'choose'} contact={contact} onCreated={(draft) => { setCreatedDraft(draft); window.location.hash = 'drafts' }} />}
         {tab === 'activity' && <ActivityPage />}
-        {tab === 'settings' && <Suspense fallback={<p role="status">Loading settings…</p>}><SettingsPage /></Suspense>}
+        {tab === 'settings' && <Suspense fallback={<p role="status">Loading settings…</p>}><SettingsPage onDeleted={() => {
+          setCSRFToken('')
+          setSession({ authenticated: false })
+          setContact(null)
+          setCreatedDraft(null)
+          setError('')
+          setDeletionRequested(true)
+          window.location.hash = 'home'
+        }} /></Suspense>}
       </main>
     </div>
   )

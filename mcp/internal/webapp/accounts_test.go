@@ -22,6 +22,18 @@ func newMemoryAccounts() *memoryAccounts {
 	return &memoryAccounts{items: map[string]Account{}, deletionRequested: map[string]bool{}}
 }
 
+func (a *memoryAccounts) WithActiveAccount(_ context.Context, id string, action func() error) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.err != nil {
+		return a.err
+	}
+	if _, exists := a.items[id]; !exists || a.deletionRequested[id] {
+		return pgx.ErrNoRows
+	}
+	return action()
+}
+
 func (a *memoryAccounts) ByID(_ context.Context, id string) (Account, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

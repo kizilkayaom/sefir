@@ -4,12 +4,17 @@ import re
 import sys
 import unittest
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.history.v1 import (
+    HistoryEvent,
+    WorkflowExecutionStartedEventAttributes,
+)
 from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
@@ -26,6 +31,7 @@ def load_bridge_functions() -> dict[str, Any]:
         "Any": Any,
         "Client": Any,
         "dataclass": dataclass,
+        "timedelta": timedelta,
         "re": re,
         "WorkflowExecution": WorkflowExecution,
         "DeleteWorkflowExecutionRequest": DeleteWorkflowExecutionRequest,
@@ -73,6 +79,11 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.handle.signal = AsyncMock()
+        self.handle.fetch_history_events.return_value.__aiter__.return_value = [
+            HistoryEvent(
+                workflow_execution_started_event_attributes=WorkflowExecutionStartedEventAttributes()
+            )
+        ]
         self.handle.result = AsyncMock(return_value={"state": "sent"})
         self.client = MagicMock()
         self.client.get_workflow_handle.return_value = self.handle
@@ -120,6 +131,7 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.functions["approve"](self.client, self.payload)
         options = self.client.start_workflow.call_args.kwargs
         self.assertEqual(options["id"], "approval-draft-test-v1")
+        self.assertEqual(options["rpc_timeout"], timedelta(seconds=10))
         self.assertEqual(
             options["id_reuse_policy"], WorkflowIDReusePolicy.REJECT_DUPLICATE
         )
@@ -442,6 +454,7 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.handle.describe.return_value.run_id = "different-run"
         delete = self.client.workflow_service.delete_workflow_execution
         for status in (
+            WorkflowExecutionStatus.CONTINUED_AS_NEW,
             WorkflowExecutionStatus.COMPLETED,
             WorkflowExecutionStatus.FAILED,
             WorkflowExecutionStatus.CANCELED,
@@ -496,7 +509,6 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         for status in (
             WorkflowExecutionStatus.RUNNING,
-            WorkflowExecutionStatus.CONTINUED_AS_NEW,
             None,
         ):
             with self.subTest(status=status):
@@ -813,7 +825,7 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.functions["list_approval_runs"](self.client, workflow_id)
 
         self.assertEqual(result, ["run-one", "run-two", "specific-run"])
-        self.client.get_workflow_handle.assert_called_once_with(workflow_id)
+        self.client.get_workflow_handle.assert_any_call(workflow_id)
         self.handle.describe.assert_awaited_once_with()
         self.client.list_workflows.assert_called_once_with(
             query=f"WorkflowId = '{workflow_id}'"
@@ -829,6 +841,65 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.client.list_workflows.assert_called_once_with(
             query=f"WorkflowId = '{workflow_id}'"
         )
+
+    async def test_list_approval_runs_follows_history_links_without_visibility(
+        self,
+    ) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        self.handle.describe.return_value.run_id = "latest"
+        self.client.list_workflows.return_value.__aiter__.return_value = []
+        handles = {}
+        for run_id, previous, original in (
+            ("latest", "previous", "reset-source"),
+            ("previous", "first", "previous"),
+            ("reset-source", "first", "reset-source"),
+            ("first", "", "first"),
+        ):
+            handle = MagicMock()
+            handle.fetch_history_events.return_value.__aiter__.return_value = [
+                HistoryEvent(
+                    workflow_execution_started_event_attributes=WorkflowExecutionStartedEventAttributes(
+                        continued_execution_run_id=previous,
+                        first_execution_run_id="first",
+                        original_execution_run_id=original,
+                    )
+                )
+            ]
+            handles[run_id] = handle
+        self.client.get_workflow_handle.side_effect = lambda _, run_id=None: (
+            handles[run_id] if run_id else self.handle
+        )
+
+        result = await self.functions["list_approval_runs"](self.client, workflow_id)
+
+        self.assertEqual(result, ["first", "latest", "previous", "reset-source"])
+        for handle in handles.values():
+            handle.fetch_history_events.assert_called_once_with(page_size=1)
+
+    async def test_list_approval_runs_requires_readable_start_events(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for events in ([], [HistoryEvent()]):
+            with self.subTest(events=events):
+                self.handle.fetch_history_events.return_value.__aiter__.return_value = (
+                    events
+                )
+                with self.assertRaisesRegex(RuntimeError, "missing its start event"):
+                    await self.functions["list_approval_runs"](self.client, workflow_id)
+        for status in (RPCStatusCode.NOT_FOUND, RPCStatusCode.UNAVAILABLE):
+            with self.subTest(status=status):
+                self.handle.fetch_history_events.side_effect = RPCError(
+                    "history error", status, b""
+                )
+                if status == RPCStatusCode.NOT_FOUND:
+                    result = await self.functions["list_approval_runs"](
+                        self.client, workflow_id
+                    )
+                    self.assertEqual(result, ["specific-run"])
+                else:
+                    with self.assertRaises(RPCError):
+                        await self.functions["list_approval_runs"](
+                            self.client, workflow_id
+                        )
 
     async def test_list_approval_runs_lists_after_missing_description(self) -> None:
         workflow_id = "approval-AABBCCDD-1111-4111-8111-111111111111-v2"

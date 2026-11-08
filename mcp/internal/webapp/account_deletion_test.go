@@ -1,11 +1,41 @@
 package webapp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
 )
+
+type deletingGmail struct {
+	fakeGmail
+	beforeStatus func()
+}
+
+func (g deletingGmail) Status(context.Context) GmailStatus {
+	g.beforeStatus()
+	return GmailStatus{Connected: true}
+}
+
+func TestApprovalRechecksDeletionAfterAuthentication(t *testing.T) {
+	server, store, bridge, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	accountID := server.sessions[cookie.Value].AccountID
+	server.gmail = &deletingGmail{beforeStatus: func() {
+		if err := server.accounts.RequestDeletion(context.Background(), accountID); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	body, err := json.Marshal(map[string]string{"content_hash": store.draft.ContentHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(server, "POST", "/api/drafts/"+testID+"/versions/1/approve", string(body), cookie, csrf)
+	if response.Code != http.StatusUnauthorized || len(bridge.calls) != 0 {
+		t.Fatalf("started workflow after deletion: %d %s; calls=%v", response.Code, response.Body.String(), bridge.calls)
+	}
+}
 
 func TestDeleteAccount(t *testing.T) {
 	server, _, _, _ := fixture(t)

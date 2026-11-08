@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { FormEvent } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { AuthNotice } from '@/components/auth-notice'
@@ -9,11 +10,14 @@ import { api, errorMessage } from '@/lib/api'
 import { repositoryURL, setupGuideURL } from '@/lib/project'
 import type { AccountStatus, GmailStatus } from '@/types/api'
 
-export function SettingsPage() {
+export function SettingsPage({ onDeleted }: { onDeleted: () => void }) {
   const gmail = useResource<GmailStatus>('/api/settings/gmail')
   const account = useResource<AccountStatus>('/api/settings/account')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [confirmation, setConfirmation] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const [deletionError, setDeletionError] = useState('')
   const result = new URLSearchParams(window.location.search).get('gmail')
   const notices: Record<string, string> = {
     connected: 'Gmail authorization saved.',
@@ -30,6 +34,22 @@ export function SettingsPage() {
     } catch (error) {
       setError(errorMessage(error))
       setBusy(false)
+    }
+  }
+
+  async function deleteAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (deleting || confirmation !== 'DELETE') return
+    setDeleting(true)
+    setDeletionError('')
+    try {
+      await api('/api/settings/account', {
+        method: 'DELETE', body: JSON.stringify({ confirmation }),
+      })
+      onDeleted()
+    } catch (error) {
+      setDeletionError(errorMessage(error))
+      setDeleting(false)
     }
   }
 
@@ -68,6 +88,17 @@ export function SettingsPage() {
           <a href={setupGuideURL} target="_blank" rel="noreferrer" className="rounded underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring">Setup guide</a>
           <a href={repositoryURL} target="_blank" rel="noreferrer" className="rounded underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring">Source code</a>
         </div>
+      </section>
+      <section className="mt-6 space-y-4 rounded-xl border border-destructive/40 bg-card p-6">
+        <h2 className="text-xl font-semibold">Delete account</h2>
+        <p className="text-sm leading-6 text-muted-foreground">This permanently deletes your account, contacts, drafts, delivery records, and saved Gmail connection. You will be signed out immediately. Cleanup runs in the background and retries if a service is unavailable.</p>
+        <p className="text-sm leading-6 text-muted-foreground">Emails already sent or being sent cannot be recalled. Copies held by Gmail, AI providers, or installation backups are outside this deletion. Shared installation settings are kept.</p>
+        <form onSubmit={deleteAccount} className="space-y-3">
+          <label htmlFor="delete-confirmation" className="block text-sm font-medium">Type DELETE to confirm</label>
+          <input id="delete-confirmation" className="field" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} disabled={deleting} autoComplete="off" spellCheck={false} />
+          {deletionError && <p role="alert" className="text-destructive">{deletionError}</p>}
+          <Button type="submit" variant="destructive" disabled={deleting || confirmation !== 'DELETE'}>{deleting ? 'Requesting deletion…' : 'Permanently delete account'}</Button>
+        </form>
       </section>
     </div>
   )

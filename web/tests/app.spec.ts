@@ -40,6 +40,9 @@ const delivery = {
 async function mockAPI(page: Page) {
   const state = {
     authenticated: true,
+    deletionError: false,
+    deletionRequests: [] as { confirmation: string }[],
+    deletionWait: null as Promise<void> | null,
     signupAvailable: false as boolean | undefined,
     setupError: false,
     googleAvailable: true,
@@ -114,6 +117,13 @@ async function mockAPI(page: Page) {
     }
     if (state.expired || !state.authenticated) return reply({ error: 'Sign in to continue' }, 401)
     if (method !== 'GET') expect(request.headers()['x-csrf-token']).toBe('csrf-test')
+    if (path === '/api/settings/account' && method === 'DELETE') {
+      state.deletionRequests.push(request.postDataJSON())
+      if (state.deletionWait) await state.deletionWait
+      if (state.deletionError) return reply({ error: 'Database operation failed. Please try again.' }, 503)
+      state.authenticated = false
+      return reply({ status: 'deletion_requested' }, 202)
+    }
     if (path === '/api/settings/account') return reply({ google_available: state.googleAvailable, google_linked: state.googleLinked, google_email: state.googleLinked ? 'owner@example.com' : '' })
     if (path === '/api/settings/ai') {
       if (state.providerError) return reply({ error: 'Could not load AI providers.' }, 503)
@@ -455,6 +465,50 @@ test('AI configuration errors can be retried and generation failures preserve th
   expect(state.generationRequests).toHaveLength(1)
   expect(state.generationRequests[0].provider).toBe('anthropic')
   expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('account deletion requires exact confirmation and clears the workspace', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishDeletion!: () => void
+  state.deletionWait = new Promise<void>((resolve) => { finishDeletion = resolve })
+  await page.goto('/#settings')
+  const button = page.getByRole('button', { name: 'Permanently delete account' })
+  const confirmation = page.getByLabel('Type DELETE to confirm')
+  await expect(button).toBeDisabled()
+  await confirmation.fill('delete')
+  await expect(button).toBeDisabled()
+  await confirmation.press('Enter')
+  expect(state.deletionRequests).toHaveLength(0)
+  await confirmation.fill('DELETE')
+  await button.click()
+  await expect(page.getByRole('button', { name: 'Requesting deletion…' })).toBeDisabled()
+  await expect(confirmation).toBeDisabled()
+  await expect.poll(() => state.deletionRequests.length).toBe(1)
+  finishDeletion()
+  await expect(page.getByRole('heading', { name: 'Account deletion requested' })).toBeVisible()
+  await expect(page.getByRole('navigation', { name: 'Main navigation' })).toHaveCount(0)
+  expect(state.deletionRequests).toEqual([{ confirmation: 'DELETE' }])
+  await page.getByRole('button', { name: 'Back to home' }).click()
+  await page.goto('/#drafts')
+  await expect(page.getByLabel('Password', { exact: true })).toBeVisible()
+  await expect(page.getByText(draft.subject, { exact: true })).toHaveCount(0)
+})
+
+test('failed account deletion preserves the session and can be retried', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.deletionError = true
+  await page.goto('/#settings')
+  await page.getByLabel('Type DELETE to confirm').fill('DELETE')
+  const button = page.getByRole('button', { name: 'Permanently delete account' })
+  await button.click()
+  await expect(page.getByRole('alert')).toHaveText('Database operation failed. Please try again.')
+  await expect(button).toBeEnabled()
+  await expect(page.getByLabel('Type DELETE to confirm')).toHaveValue('DELETE')
+  expect(state.authenticated).toBe(true)
+  state.deletionError = false
+  await button.click()
+  await expect(page.getByRole('heading', { name: 'Account deletion requested' })).toBeVisible()
+  expect(state.deletionRequests).toHaveLength(2)
 })
 
 test('settings shows the connected account and session expiry returns to login', async ({ page }) => {

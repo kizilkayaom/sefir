@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/mail"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/kizilkayaom/sefir/mcp/internal/catalogue"
 )
 
@@ -222,10 +224,19 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnprocessableEntity, "Connect Gmail in Settings before approving this email.")
 		return
 	}
-	result, err := s.bridge.Call(ctx, "approve", map[string]any{
-		"draft_id": id, "version": version, "content_hash": draft.ContentHash,
-		"approval_id": approvalID(id, version, draft.ContentHash), "approved_by": contextAccount(ctx).Username,
+	var result json.RawMessage
+	err = s.accounts.WithActiveAccount(ctx, contextAccount(ctx).ID, func() error {
+		var callErr error
+		result, callErr = s.bridge.Call(ctx, "approve", map[string]any{
+			"draft_id": id, "version": version, "content_hash": draft.ContentHash,
+			"approval_id": approvalID(id, version, draft.ContentHash), "approved_by": contextAccount(ctx).Username,
+		})
+		return callErr
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		fail(w, http.StatusUnauthorized, "This account is no longer available")
+		return
+	}
 	if err != nil {
 		fail(w, http.StatusBadGateway, "Approval could not be confirmed. Refresh status before retrying; retries use the same approval.")
 		return

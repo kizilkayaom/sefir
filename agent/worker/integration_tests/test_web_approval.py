@@ -2,6 +2,7 @@ import ast
 import asyncio
 import shutil
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ def bridge_functions() -> dict[str, Any]:
     namespace = {
         "Client": Client,
         "Any": Any,
+        "timedelta": timedelta,
         "WorkflowExecutionStatus": WorkflowExecutionStatus,
         "WorkflowFailureError": WorkflowFailureError,
         "WorkflowIDConflictPolicy": WorkflowIDConflictPolicy,

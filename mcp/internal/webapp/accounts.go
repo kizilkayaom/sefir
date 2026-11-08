@@ -35,9 +35,31 @@ type Accounts interface {
 	LinkGoogle(context.Context, string, GoogleIdentity) (Account, error)
 	ImportLegacy(context.Context, *ownerCredentials) error
 	RequestDeletion(context.Context, string) error
+	WithActiveAccount(context.Context, string, func() error) error
 }
 
 type PostgresAccounts struct{ Pool *pgxpool.Pool }
+
+func (a PostgresAccounts) WithActiveAccount(ctx context.Context, accountID string, action func() error) error {
+	if !uuidPattern.MatchString(accountID) || action == nil {
+		return errors.New("valid account ID and action are required")
+	}
+	tx, err := a.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var id string
+	if err := tx.QueryRow(ctx, `SELECT account_id::text FROM accounts
+		WHERE account_id=$1 AND NOT legacy_reserved AND deletion_requested_at IS NULL
+		FOR SHARE`, accountID).Scan(&id); err != nil {
+		return err
+	}
+	if err := action(); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
 
 const accountColumns = `account_id::text, username, password_salt, password_hash,
 	COALESCE(google_subject, ''), COALESCE(google_email, '')`

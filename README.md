@@ -292,6 +292,14 @@ uv run --project agent --package sefir-agent --locked python -m unittest discove
 
 GitHub Actions runs frontend lint, builds and browser tests, Go database tests, Python unit and Temporal integration tests, and Terraform validation.
 
+## Account deletion
+
+In **Settings → Delete account**, type `DELETE` and confirm. The account immediately loses access, and its sessions and pending sign-in attempts are invalidated. Deletion cannot be cancelled.
+
+The web server checks pending deletions every 30 seconds in batches. Cleanup starts after a two-minute grace period for in-flight requests. It stops approval workflows, removes the saved Gmail token, records the discovered Temporal run IDs, requests their deletion, and verifies that executions and histories are gone before purging the account, contacts, draft versions, approvals, and outbox records. Saved run IDs let cleanup resume after a restart or a partial failure. Keep the web server, PostgreSQL, and Temporal running; check web logs for `Account deletion will retry` or `Account deletion completed`.
+
+Old `sending` records are closed with an unknown delivery outcome after the grace period. Cleanup never resends them or treats them as confirmed deliveries. An email already handed to Gmail cannot be recalled. Gmail mailboxes, AI-provider records, Temporal archives, installation logs, and backups are outside this cleanup; the installation operator manages their retention separately. Shared AI keys and OAuth client configuration are preserved. For the original owner, the legacy account file is removed as well; any owner credentials set in the operator's environment must be removed there separately.
+
 ## Troubleshooting
 
 - **Web assets are missing:** Run `npm --prefix web run build`, or set `SEFIR_WEB_DIST` to the directory containing the built `index.html`.
@@ -306,6 +314,7 @@ GitHub Actions runs frontend lint, builds and browser tests, Go database tests, 
 - **Google redirect mismatch:** Register the exact callback URL for the origin you are using, including its path and port.
 - **Gmail reconnect required:** Reconnect in Settings. Check that the Gmail API is enabled and its callback URL is registered.
 - **Old data missing after Google sign-in:** Sign in with the original account. A separate Google account has its own workspace; link Google from Settings to use it with an existing password account.
+- **Account deletion remains pending:** Keep the web server running and check its cleanup logs. Restore PostgreSQL/Temporal access or fix token-file permissions; cleanup retries automatically. It keeps database records until workflow history deletion is confirmed.
 
 ## Deployment
 

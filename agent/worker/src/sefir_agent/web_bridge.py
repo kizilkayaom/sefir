@@ -4,6 +4,7 @@ import os
 import re
 import sys
 from contextlib import redirect_stdout
+from datetime import timedelta
 from typing import Any
 
 from temporalio.api.common.v1 import WorkflowExecution
@@ -69,6 +70,7 @@ async def approve(client: Client, payload: dict[str, Any]) -> dict[str, Any]:
             task_queue="sefir-outreach",
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            rpc_timeout=timedelta(seconds=10),
         )
     except WorkflowAlreadyStartedError:
         pass
@@ -202,6 +204,7 @@ async def request_approval_run_deletion(
     try:
         description = await handle.describe()
         terminal = {
+            WorkflowExecutionStatus.CONTINUED_AS_NEW,
             WorkflowExecutionStatus.COMPLETED,
             WorkflowExecutionStatus.FAILED,
             WorkflowExecutionStatus.CANCELED,
@@ -280,6 +283,30 @@ async def list_approval_runs(client: Client, workflow_id: str) -> list[str]:
         if not isinstance(execution.run_id, str) or not execution.run_id.strip():
             raise RuntimeError("Temporal returned an invalid workflow run ID")
         run_ids.add(execution.run_id)
+
+    pending = list(run_ids)
+    while pending:
+        run_id = pending.pop()
+        run_handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+        try:
+            async for event in run_handle.fetch_history_events(page_size=1):
+                if not event.HasField("workflow_execution_started_event_attributes"):
+                    raise RuntimeError("Workflow history is missing its start event")
+                started = event.workflow_execution_started_event_attributes
+                for linked_id in (
+                    started.continued_execution_run_id,
+                    started.first_execution_run_id,
+                    started.original_execution_run_id,
+                ):
+                    if linked_id and linked_id not in run_ids:
+                        run_ids.add(linked_id)
+                        pending.append(linked_id)
+                break
+            else:
+                raise RuntimeError("Workflow history is missing its start event")
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
     return sorted(run_ids)
 
 

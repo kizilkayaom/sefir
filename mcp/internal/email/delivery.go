@@ -34,6 +34,8 @@ func SendOutboxMessage(
 	from string,
 	messageIDDomain string,
 ) (OutboxEntry, error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
 	if pool == nil || client == nil {
 		return OutboxEntry{}, errors.New("database pool and HTTP client are required")
 	}

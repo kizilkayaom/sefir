@@ -79,12 +79,14 @@ func run() error {
 		return errors.New("database connection failed; check DATABASE_URL and PostgreSQL")
 	}
 	defer pool.Close()
-	config.Accounts = webapp.PostgresAccounts{Pool: pool}
+	accounts := webapp.PostgresAccounts{Pool: pool}
+	config.Accounts = accounts
 	checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_, err = pool.Exec(checkCtx, "SELECT account_id FROM accounts LIMIT 0")
+	_, err = pool.Exec(checkCtx, `SELECT a.deletion_requested_at, r.workflow_id, r.run_id
+		FROM accounts a LEFT JOIN account_deletion_runs r ON r.account_id=a.account_id LIMIT 0`)
 	checkCancel()
 	if err != nil {
-		return errors.New("account database is not ready; apply migration 00007_add_accounts.sql")
+		return errors.New("account database is not ready; apply all database migrations")
 	}
 	app, err := webapp.New(config, webapp.PostgresStore{Pool: pool}, bridge, nil)
 	if err != nil {
@@ -97,6 +99,31 @@ func run() error {
 	}
 	stopping, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	worker := webapp.AccountDeletionWorker{
+		Accounts: accounts,
+		Cleaner: webapp.AccountCleaner{
+			Accounts: accounts, Bridge: bridge,
+			RemoveGmailToken: func(accountID string) error {
+				connection, err := getGmailConnection(accountID)
+				if err != nil {
+					return err
+				}
+				if err := connection.RemoveToken(); err != nil {
+					return err
+				}
+				return workspace.RemoveAccountFiles(root, accountID)
+			},
+		},
+	}
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		worker.Run(stopping)
+	}()
+	defer func() {
+		stop()
+		<-cleanupDone
+	}()
 	go func() {
 		<-stopping.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
