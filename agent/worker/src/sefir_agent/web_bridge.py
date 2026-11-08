@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 from contextlib import redirect_stdout
 from typing import Any
@@ -104,16 +105,20 @@ async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         "stop_approval",
         "request_approval_run_deletion",
         "approval_run_deleted",
+        "list_approval_runs",
     }:
         raise ValueError("Unknown web operation")
     if action in {
         "stop_approval",
         "request_approval_run_deletion",
         "approval_run_deleted",
+        "list_approval_runs",
     }:
         workflow_id = payload.get("workflow_id")
         if not isinstance(workflow_id, str) or not workflow_id.strip():
             raise ValueError("workflow_id must be a non-empty string")
+    if action == "list_approval_runs":
+        validate_approval_workflow_id(workflow_id)
     if action in {"request_approval_run_deletion", "approval_run_deleted"}:
         run_id = payload.get("run_id")
         if not isinstance(run_id, str) or not run_id.strip():
@@ -132,6 +137,9 @@ async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     if action == "approval_run_deleted":
         deleted = await approval_run_deleted(client, workflow_id, run_id)
         return {"workflow_id": workflow_id, "run_id": run_id, "deleted": deleted}
+    if action == "list_approval_runs":
+        run_ids = await list_approval_runs(client, workflow_id)
+        return {"workflow_id": workflow_id, "run_ids": run_ids}
     if action == "approve":
         return await approve(client, payload)
     return await workflow_status(client, payload["draft_id"], payload["version"])
@@ -240,6 +248,39 @@ async def approval_run_deleted(client: Client, workflow_id: str, run_id: str) ->
             return True
         raise
     return False
+
+
+def validate_approval_workflow_id(workflow_id: object) -> None:
+    if not isinstance(workflow_id, str) or not re.fullmatch(
+        r"approval-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-v[1-9][0-9]*",
+        workflow_id,
+    ):
+        raise ValueError("workflow_id must match approval-<UUID>-v<positive integer>")
+
+
+async def list_approval_runs(client: Client, workflow_id: str) -> list[str]:
+    validate_approval_workflow_id(workflow_id)
+    run_ids: set[str] = set()
+    handle = client.get_workflow_handle(workflow_id)
+    try:
+        description = await handle.describe()
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+    else:
+        if not isinstance(description.run_id, str) or not description.run_id.strip():
+            raise RuntimeError("Temporal returned an invalid workflow run ID")
+        run_ids.add(description.run_id)
+
+    query = f"WorkflowId = '{workflow_id}'"
+    async for execution in client.list_workflows(query=query):
+        if execution.id != workflow_id:
+            raise RuntimeError("Temporal returned an unexpected workflow ID")
+        if not isinstance(execution.run_id, str) or not execution.run_id.strip():
+            raise RuntimeError("Temporal returned an invalid workflow run ID")
+        run_ids.add(execution.run_id)
+    return sorted(run_ids)
 
 
 if __name__ == "__main__":

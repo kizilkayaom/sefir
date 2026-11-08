@@ -10,6 +10,8 @@ import (
 type AccountCleanupStore interface {
 	HasSendingOutbox(context.Context, string) (bool, error)
 	DeletionWorkflowIDs(context.Context, string) ([]string, error)
+	SaveDeletionRun(context.Context, string, string, string) error
+	DeletionRuns(context.Context, string) ([]DeletionRun, error)
 }
 
 type AccountCleaner struct {
@@ -30,7 +32,11 @@ func (c AccountCleaner) prepareDeletion(ctx context.Context, accountID string) (
 	if err := c.RemoveGmailToken(accountID); err != nil {
 		return false, err
 	}
-	return true, nil
+
+	if err := c.recordDeletionRuns(ctx, accountID); err != nil {
+		return false, err
+	}
+	return c.deleteRecordedRuns(ctx, accountID)
 }
 
 func (c AccountCleaner) stopWorkflows(ctx context.Context, accountID string) (bool, error) {
@@ -52,6 +58,47 @@ func (c AccountCleaner) stopWorkflows(ctx context.Context, accountID string) (bo
 		}
 	}
 	return true, nil
+}
+
+func (c AccountCleaner) recordDeletionRuns(ctx context.Context, accountID string) error {
+	workflowIDs, err := c.Accounts.DeletionWorkflowIDs(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	for _, workflowID := range workflowIDs {
+		runIDs, err := listApprovalRuns(ctx, c.Bridge, workflowID)
+		if err != nil {
+			return err
+		}
+		for _, runID := range runIDs {
+			if err := c.Accounts.SaveDeletionRun(ctx, accountID, workflowID, runID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (c AccountCleaner) deleteRecordedRuns(ctx context.Context, accountID string) (bool, error) {
+	runs, err := c.Accounts.DeletionRuns(ctx, accountID)
+	if err != nil {
+		return false, err
+	}
+	allDeleted := true
+	for _, run := range runs {
+		deleted, err := approvalRunDeleted(ctx, c.Bridge, run.WorkflowID, run.RunID)
+		if err != nil {
+			return false, err
+		}
+		if deleted {
+			continue
+		}
+		if err := requestApprovalRunDeletion(ctx, c.Bridge, run.WorkflowID, run.RunID); err != nil {
+			return false, err
+		}
+		allDeleted = false
+	}
+	return allDeleted, nil
 }
 
 func stopApprovalWorkflow(ctx context.Context, bridge Bridge, workflowID string) error {
@@ -131,4 +178,32 @@ func approvalRunDeleted(ctx context.Context, bridge Bridge, workflowID, runID st
 		return false, errors.New("agent did not confirm workflow run deletion status")
 	}
 	return *result.Deleted, nil
+}
+
+func listApprovalRuns(ctx context.Context, bridge Bridge, workflowID string) ([]string, error) {
+	if strings.TrimSpace(workflowID) == "" {
+		return nil, errors.New("workflow ID is required")
+	}
+
+	response, err := bridge.Call(ctx, "list_approval_runs", map[string]string{"workflow_id": workflowID})
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		WorkflowID string   `json:"workflow_id"`
+		RunIDs     []string `json:"run_ids"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil {
+		return nil, err
+	}
+	if result.WorkflowID != workflowID || result.RunIDs == nil {
+		return nil, errors.New("agent did not confirm workflow runs")
+	}
+	for _, runID := range result.RunIDs {
+		if strings.TrimSpace(runID) == "" {
+			return nil, errors.New("agent returned an invalid workflow run ID")
+		}
+	}
+	return result.RunIDs, nil
 }

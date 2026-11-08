@@ -1,5 +1,6 @@
 import ast
 import os
+import re
 import sys
 import unittest
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ def load_bridge_functions() -> dict[str, Any]:
         "Any": Any,
         "Client": Any,
         "dataclass": dataclass,
+        "re": re,
         "WorkflowExecution": WorkflowExecution,
         "DeleteWorkflowExecutionRequest": DeleteWorkflowExecutionRequest,
         "WorkflowExecutionStatus": WorkflowExecutionStatus,
@@ -45,6 +47,8 @@ def load_bridge_functions() -> dict[str, Any]:
                 "stop_approval_workflow",
                 "request_approval_run_deletion",
                 "approval_run_deleted",
+                "validate_approval_workflow_id",
+                "list_approval_runs",
             },
         ),
     ):
@@ -52,7 +56,7 @@ def load_bridge_functions() -> dict[str, Any]:
         tree.body = [
             node
             for node in tree.body
-            if isinstance(node, (ast.ClassDef, ast.AsyncFunctionDef))
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name in allowed
         ]
         exec(compile(tree, filename, "exec"), namespace)
@@ -673,6 +677,280 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
                     self.handle.describe.assert_not_awaited()
                     self.handle.fetch_history_events.assert_not_called()
                     self.client.workflow_service.delete_workflow_execution.assert_not_awaited()
+
+    async def test_list_approval_runs_dispatch_returns_helper_runs(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for run_ids in ([], ["run-one", "run-two"]):
+            with (
+                self.subTest(run_ids=run_ids),
+                patch(
+                    "sefir_agent.web_bridge.Client.connect",
+                    new_callable=AsyncMock,
+                    return_value=self.client,
+                ) as connect,
+                patch(
+                    "sefir_agent.web_bridge.list_approval_runs",
+                    new_callable=AsyncMock,
+                    return_value=run_ids,
+                ) as helper,
+            ):
+                result = await dispatch(
+                    "list_approval_runs", {"workflow_id": workflow_id}
+                )
+
+                self.assertEqual(
+                    result, {"workflow_id": workflow_id, "run_ids": run_ids}
+                )
+                connect.assert_awaited_once()
+                helper.assert_awaited_once_with(self.client, workflow_id)
+                self.client.get_workflow_handle.assert_not_called()
+
+    async def test_list_approval_runs_dispatch_rejects_invalid_ids_before_connecting(
+        self,
+    ) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        payloads = [{}] + [
+            {"workflow_id": value}
+            for value in (
+                None,
+                "",
+                " \t\n",
+                123,
+                False,
+                [],
+                {},
+                "approval-draft-test-v1",
+                workflow_id.replace("approval-", "other-"),
+                workflow_id.replace("11111111", "gggggggg", 1),
+                workflow_id + "\n",
+                " " + workflow_id,
+                workflow_id + "' OR ExecutionStatus = 'Running",
+                workflow_id[:-1] + "0",
+                workflow_id[:-1] + "-1",
+                workflow_id[:-1] + "01",
+                workflow_id[:-1] + "1.5",
+                workflow_id[:-1] + "\u0661",
+            )
+        ]
+        for payload in payloads:
+            with (
+                self.subTest(payload=payload),
+                patch(
+                    "sefir_agent.web_bridge.Client.connect", new_callable=AsyncMock
+                ) as connect,
+                patch(
+                    "sefir_agent.web_bridge.list_approval_runs",
+                    new_callable=AsyncMock,
+                ) as helper,
+            ):
+                with self.assertRaisesRegex(ValueError, "workflow_id must"):
+                    await dispatch("list_approval_runs", payload)
+
+                connect.assert_not_awaited()
+                helper.assert_not_awaited()
+
+    async def test_list_approval_runs_dispatch_propagates_helper_errors(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for error in (
+            ValueError("invalid workflow"),
+            RuntimeError("unexpected workflow"),
+            RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b""),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "sefir_agent.web_bridge.Client.connect",
+                    new_callable=AsyncMock,
+                    return_value=self.client,
+                ) as connect,
+                patch(
+                    "sefir_agent.web_bridge.list_approval_runs",
+                    new_callable=AsyncMock,
+                    side_effect=error,
+                ) as helper,
+                self.assertRaises(type(error)) as caught,
+            ):
+                await dispatch("list_approval_runs", {"workflow_id": workflow_id})
+
+            self.assertIs(caught.exception, error)
+            connect.assert_awaited_once()
+            helper.assert_awaited_once_with(self.client, workflow_id)
+
+    async def test_list_approval_runs_dispatch_propagates_connection_errors(
+        self,
+    ) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for error in (
+            RuntimeError("connection failed"),
+            RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b""),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "sefir_agent.web_bridge.Client.connect",
+                    new_callable=AsyncMock,
+                    side_effect=error,
+                ) as connect,
+                patch(
+                    "sefir_agent.web_bridge.list_approval_runs",
+                    new_callable=AsyncMock,
+                ) as helper,
+                self.assertRaises(type(error)) as caught,
+            ):
+                await dispatch("list_approval_runs", {"workflow_id": workflow_id})
+
+            self.assertIs(caught.exception, error)
+            connect.assert_awaited_once()
+            helper.assert_not_awaited()
+
+    async def test_list_approval_runs_merges_and_sorts_unique_runs(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        self.client.list_workflows.return_value.__aiter__.return_value = [
+            SimpleNamespace(id=workflow_id, run_id=run_id)
+            for run_id in ("run-two", "specific-run", "run-one", "run-two")
+        ]
+
+        result = await self.functions["list_approval_runs"](self.client, workflow_id)
+
+        self.assertEqual(result, ["run-one", "run-two", "specific-run"])
+        self.client.get_workflow_handle.assert_called_once_with(workflow_id)
+        self.handle.describe.assert_awaited_once_with()
+        self.client.list_workflows.assert_called_once_with(
+            query=f"WorkflowId = '{workflow_id}'"
+        )
+
+    async def test_list_approval_runs_retains_run_missing_from_listing(self) -> None:
+        workflow_id = "approval-aabbccdd-1111-4111-8111-111111111111-v12"
+        self.client.list_workflows.return_value.__aiter__.return_value = []
+
+        result = await self.functions["list_approval_runs"](self.client, workflow_id)
+
+        self.assertEqual(result, ["specific-run"])
+        self.client.list_workflows.assert_called_once_with(
+            query=f"WorkflowId = '{workflow_id}'"
+        )
+
+    async def test_list_approval_runs_lists_after_missing_description(self) -> None:
+        workflow_id = "approval-AABBCCDD-1111-4111-8111-111111111111-v2"
+        self.handle.describe.side_effect = RPCError(
+            "missing", RPCStatusCode.NOT_FOUND, b""
+        )
+        for run_ids in ([], ["older-run"]):
+            with self.subTest(run_ids=run_ids):
+                self.client.list_workflows.reset_mock()
+                self.client.list_workflows.return_value.__aiter__.return_value = [
+                    SimpleNamespace(id=workflow_id, run_id=run_id) for run_id in run_ids
+                ]
+
+                result = await self.functions["list_approval_runs"](
+                    self.client, workflow_id
+                )
+
+                self.assertEqual(result, run_ids)
+                self.client.list_workflows.assert_called_once_with(
+                    query=f"WorkflowId = '{workflow_id}'"
+                )
+
+    async def test_list_approval_runs_rejects_invalid_workflow_ids(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for value in (
+            None,
+            "",
+            " \t\n",
+            123,
+            False,
+            [],
+            {},
+            "approval-draft-test-v1",
+            workflow_id.replace("approval-", "other-"),
+            workflow_id.replace("11111111", "gggggggg", 1),
+            workflow_id + "\n",
+            " " + workflow_id,
+            workflow_id + "' OR ExecutionStatus = 'Running",
+            workflow_id[:-1] + "0",
+            workflow_id[:-1] + "-1",
+            workflow_id[:-1] + "01",
+            workflow_id[:-1] + "1.5",
+            workflow_id[:-1] + "\u0661",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "workflow_id must match"):
+                    await self.functions["list_approval_runs"](self.client, value)
+
+                self.client.get_workflow_handle.assert_not_called()
+                self.client.list_workflows.assert_not_called()
+
+    async def test_list_approval_runs_rejects_invalid_described_run(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for run_id in (None, "", " \t\n", 123, False, [], {}):
+            with self.subTest(run_id=run_id):
+                self.handle.describe.return_value.run_id = run_id
+
+                with self.assertRaisesRegex(RuntimeError, "invalid workflow run ID"):
+                    await self.functions["list_approval_runs"](self.client, workflow_id)
+
+                self.client.list_workflows.assert_not_called()
+
+    async def test_list_approval_runs_rejects_invalid_listed_runs(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for execution, message in (
+            (
+                SimpleNamespace(id=workflow_id[:-1] + "2", run_id="other-run"),
+                "unexpected workflow ID",
+            ),
+            *(
+                (
+                    SimpleNamespace(id=workflow_id, run_id=run_id),
+                    "invalid workflow run ID",
+                )
+                for run_id in (None, "", " \t\n", 123, False, [], {})
+            ),
+        ):
+            with self.subTest(execution=execution):
+                self.client.list_workflows.return_value.__aiter__.return_value = [
+                    execution
+                ]
+
+                with self.assertRaisesRegex(RuntimeError, message):
+                    await self.functions["list_approval_runs"](self.client, workflow_id)
+
+    async def test_list_approval_runs_propagates_describe_errors(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for status in (RPCStatusCode.UNAVAILABLE, RPCStatusCode.PERMISSION_DENIED):
+            with self.subTest(status=status):
+                error = RPCError("describe failed", status, b"")
+                self.handle.describe.side_effect = error
+
+                with self.assertRaises(RPCError) as caught:
+                    await self.functions["list_approval_runs"](self.client, workflow_id)
+
+                self.assertIs(caught.exception, error)
+                self.client.list_workflows.assert_not_called()
+
+    async def test_list_approval_runs_propagates_listing_errors(self) -> None:
+        workflow_id = "approval-11111111-1111-4111-8111-111111111111-v1"
+        for status in (
+            RPCStatusCode.NOT_FOUND,
+            RPCStatusCode.UNAVAILABLE,
+            RPCStatusCode.PERMISSION_DENIED,
+        ):
+            for partial in (False, True):
+                with self.subTest(status=status, partial=partial):
+                    error = RPCError("listing failed", status, b"")
+
+                    async def executions(partial: bool, error: RPCError):
+                        if partial:
+                            yield SimpleNamespace(id=workflow_id, run_id="older-run")
+                        raise error
+
+                    self.client.list_workflows.return_value = executions(partial, error)
+
+                    with self.assertRaises(RPCError) as caught:
+                        await self.functions["list_approval_runs"](
+                            self.client, workflow_id
+                        )
+
+                    self.assertIs(caught.exception, error)
 
 
 class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
