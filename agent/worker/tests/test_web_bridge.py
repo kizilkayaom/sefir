@@ -3,7 +3,7 @@ import os
 import re
 import sys
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +22,7 @@ from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from sefir_agent.providers import ProviderConfigurationError
+from sefir_agent.styles import PRESETS
 from sefir_agent.web_bridge import dispatch
 
 
@@ -1052,12 +1053,12 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
                     "provider": "anthropic",
                 },
             )
-        self.assertEqual(result, draft)
+        self.assertEqual(result, {**draft, "preset_id": "prof", "preset_revision": 1})
         generate.assert_awaited_once_with(
             {"name": "Alex Example"},
             "Fictional resume",
             "anthropic",
-            preset_id=None,
+            preset_id="prof",
         )
 
     async def test_generate_passes_preset_to_drafting(self) -> None:
@@ -1076,7 +1077,35 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
                     "preset_id": "formal",
                 },
             )
-        self.assertEqual(result, draft)
+        self.assertEqual(result, {**draft, "preset_id": "formal", "preset_revision": 1})
+        generate.assert_awaited_once_with(
+            {"name": "Alex Example"},
+            "Fictional resume",
+            "anthropic",
+            preset_id="formal",
+        )
+
+    async def test_generate_returns_selected_preset_revision(self) -> None:
+        draft = {"subject": "Hello", "body": "A fictional introduction."}
+        generate = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: draft))
+        preset = replace(PRESETS["formal"], revision=2)
+        with (
+            patch.dict(PRESETS, {"formal": preset}),
+            patch.dict(
+                sys.modules,
+                {"sefir_agent.drafting": SimpleNamespace(draft_outreach=generate)},
+            ),
+        ):
+            result = await dispatch(
+                "generate",
+                {
+                    "contact": {"name": "Alex Example"},
+                    "cv_text": "Fictional resume",
+                    "provider": "anthropic",
+                    "preset_id": "formal",
+                },
+            )
+        self.assertEqual(result, {**draft, "preset_id": "formal", "preset_revision": 2})
         generate.assert_awaited_once_with(
             {"name": "Alex Example"},
             "Fictional resume",

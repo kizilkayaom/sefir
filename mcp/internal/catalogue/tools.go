@@ -30,6 +30,15 @@ func RegisterTools(server *mcp.Server, pool *pgxpool.Pool) {
 			"recipient_email": {
 				"anyOf": [{"type": "string"}, {"type": "null"}]
 			},
+			"preset_id": {
+				"anyOf": [{"type": "string"}, {"type": "null"}]
+			},
+			"preset_revision": {
+				"anyOf": [
+					{"type": "integer", "minimum": 1},
+					{"type": "null"}
+				]
+			},
 			"subject": {"type": "string", "minLength": 1},
 			"body": {"type": "string", "minLength": 1},
 			"body_html": {"type": "string"},
@@ -38,7 +47,7 @@ func RegisterTools(server *mcp.Server, pool *pgxpool.Pool) {
 		},
 		"required": [
 			"draft_id", "version", "contact_id", "recipient_email",
-			"subject", "body", "content_hash", "created_at"
+			"subject", "body", "content_hash", "created_at", "preset_id", "preset_revision"
 		],
 		"additionalProperties": false
 	}`)

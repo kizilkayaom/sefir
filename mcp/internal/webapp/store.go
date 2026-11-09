@@ -65,7 +65,7 @@ func (s PostgresStore) Drafts(ctx context.Context, limit, offset int) ([]catalog
 		return nil, err
 	}
 	rows, err := s.Pool.Query(ctx, `SELECT d.draft_id::text, d.version, d.contact_id::text, d.recipient_email,
-		d.subject, d.body, d.body_html, d.content_hash, d.created_at
+		d.subject, d.body, d.body_html, d.content_hash, d.created_at, d.preset_id, d.preset_revision
 		FROM drafts d JOIN contacts c ON c.id=d.contact_id WHERE c.account_id=$3
 		ORDER BY d.created_at DESC, d.draft_id DESC, d.version DESC LIMIT $1 OFFSET $2`, limit, offset, accountID)
 	if err != nil {

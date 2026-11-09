@@ -15,6 +15,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from sefir_agent.providers import ProviderConfigurationError, provider_catalog
+from sefir_agent.styles import get_tone_preset
 from sefir_agent.workflow_types import ApprovalWorkflowInput, DraftApproval
 
 
@@ -94,16 +95,21 @@ async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     if action == "generate":
         from sefir_agent.drafting import draft_outreach
 
+        preset = get_tone_preset(payload.get("preset_id"))
         try:
             draft = await draft_outreach(
                 payload["contact"],
                 payload["cv_text"],
                 payload.get("provider"),
-                preset_id=payload.get("preset_id"),
+                preset_id=preset.id,
             )
         except ProviderConfigurationError:
             return {"error": "provider_unavailable"}
-        return draft.model_dump()
+        return {
+            **draft.model_dump(),
+            "preset_id": preset.id,
+            "preset_revision": preset.revision,
+        }
     if action not in {
         "approve",
         "status",

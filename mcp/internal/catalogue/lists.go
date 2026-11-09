@@ -14,7 +14,7 @@ func ListDrafts(ctx context.Context, pool *pgxpool.Pool, limit, offset int) ([]D
 	}
 	rows, err := pool.Query(ctx, `
 		SELECT draft_id::text, version, contact_id::text, recipient_email,
-			subject, body, body_html, content_hash, created_at
+			subject, body, body_html, content_hash, created_at, preset_id, preset_revision
 		FROM drafts ORDER BY created_at DESC, draft_id DESC, version DESC
 		LIMIT $1 OFFSET $2`, limit, offset)
 	if err != nil {

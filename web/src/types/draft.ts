@@ -8,4 +8,6 @@ export type Draft = {
   body_html?: string
   content_hash: string
   created_at: string
+  preset_id: string | null
+  preset_revision: number | null
 }

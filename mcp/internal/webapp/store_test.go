@@ -143,6 +143,9 @@ func TestPostgresWebFlow(t *testing.T) {
 	if err != nil || richDraft.Body != "Written by hand" || richDraft.BodyHTML == "" {
 		t.Fatalf("manual formatted draft: %+v %v", richDraft, err)
 	}
+	if richDraft.PresetID != nil || richDraft.PresetRevision != nil {
+		t.Fatal("manual draft response included writing style metadata")
+	}
 	var storedPreset *string
 	var storedRevision *int
 	if err := pool.QueryRow(ctx, "SELECT preset_id, preset_revision FROM drafts WHERE draft_id=$1 AND version=$2",
@@ -178,6 +181,10 @@ func TestPostgresWebFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if styledDraft.PresetID == nil || *styledDraft.PresetID != preset ||
+		styledDraft.PresetRevision == nil || *styledDraft.PresetRevision != revision {
+		t.Fatal("created draft response lost its writing style metadata")
+	}
 	if err := pool.QueryRow(ctx, "SELECT preset_id, preset_revision FROM drafts WHERE draft_id=$1 AND version=$2",
 		styledDraft.DraftID, styledDraft.Version).Scan(&storedPreset, &storedRevision); err != nil {
 		t.Fatal(err)
@@ -194,6 +201,10 @@ func TestPostgresWebFlow(t *testing.T) {
 	if styledRevision.DraftID != styledDraft.DraftID || styledRevision.Version != styledDraft.Version+1 {
 		t.Fatal("editing did not create the expected draft version")
 	}
+	if styledRevision.PresetID == nil || *styledRevision.PresetID != preset ||
+		styledRevision.PresetRevision == nil || *styledRevision.PresetRevision != revision {
+		t.Fatal("edited draft response lost its writing style metadata")
+	}
 	for _, version := range []int{styledDraft.Version, styledRevision.Version} {
 		if err := pool.QueryRow(ctx, "SELECT preset_id, preset_revision FROM drafts WHERE draft_id=$1 AND version=$2",
 			styledDraft.DraftID, version).Scan(&storedPreset, &storedRevision); err != nil {
@@ -201,6 +212,49 @@ func TestPostgresWebFlow(t *testing.T) {
 		}
 		if storedPreset == nil || *storedPreset != preset || storedRevision == nil || *storedRevision != revision {
 			t.Fatalf("draft version %d lost its writing style metadata", version)
+		}
+		fetched, err := store.Draft(ctx, styledDraft.DraftID, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched.DraftID != styledDraft.DraftID || fetched.Version != version ||
+			fetched.PresetID == nil || *fetched.PresetID != preset ||
+			fetched.PresetRevision == nil || *fetched.PresetRevision != revision {
+			t.Fatalf("fetched draft version %d lost its identity or writing style metadata", version)
+		}
+	}
+
+	webDrafts, err := store.Drafts(ctx, 25, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogueDrafts, err := catalogue.ListDrafts(ctx, pool, 25, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []struct {
+		name   string
+		drafts []catalogue.Draft
+	}{
+		{name: "web", drafts: webDrafts},
+		{name: "catalogue", drafts: catalogueDrafts},
+	} {
+		found := map[int]bool{}
+		for _, listed := range result.drafts {
+			if listed.DraftID != styledDraft.DraftID ||
+				(listed.Version != styledDraft.Version && listed.Version != styledRevision.Version) {
+				continue
+			}
+			if listed.PresetID == nil || *listed.PresetID != preset ||
+				listed.PresetRevision == nil || *listed.PresetRevision != revision {
+				t.Fatalf("%s listing lost writing style metadata for version %d", result.name, listed.Version)
+			}
+			found[listed.Version] = true
+		}
+		for _, version := range []int{styledDraft.Version, styledRevision.Version} {
+			if !found[version] {
+				t.Fatalf("%s listing is missing styled draft version %d", result.name, version)
+			}
 		}
 	}
 }

@@ -21,6 +21,8 @@ type Draft struct {
 	BodyHTML       string    `json:"body_html,omitempty"`
 	ContentHash    string    `json:"content_hash"`
 	CreatedAt      time.Time `json:"created_at"`
+	PresetID       *string   `json:"preset_id"`
+	PresetRevision *int      `json:"preset_revision"`
 }
 
 type CreateDraftInput struct {
@@ -76,7 +78,7 @@ func CreateDraft(
 			AND status = 'confirmed'
 			AND email IS NOT DISTINCT FROM $2
 		RETURNING draft_id::text, version, contact_id::text, recipient_email,
-			subject, body, body_html, content_hash, created_at
+			subject, body, body_html, content_hash, created_at, preset_id, preset_revision
 	`
 
 	var draft Draft
@@ -93,6 +95,8 @@ func CreateDraft(
 		&draft.BodyHTML,
 		&draft.ContentHash,
 		&draft.CreatedAt,
+		&draft.PresetID,
+		&draft.PresetRevision,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Draft{}, errors.New("contact changed before the draft could be saved")
@@ -119,7 +123,7 @@ func GetDraft(
 	}
 	const query = `
 	SELECT draft_id::text, version, contact_id::text, recipient_email,
-       subject, body, body_html, content_hash, created_at
+       subject, body, body_html, content_hash, created_at, preset_id, preset_revision
 	FROM drafts
 	WHERE draft_id = $1 AND version = $2
 	`
@@ -134,6 +138,8 @@ func GetDraft(
 		&draft.BodyHTML,
 		&draft.ContentHash,
 		&draft.CreatedAt,
+		&draft.PresetID,
+		&draft.PresetRevision,
 	)
 	if err != nil {
 		return Draft{}, err

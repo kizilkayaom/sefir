@@ -65,7 +65,7 @@ func SaveDraftVersion(ctx context.Context, pool *pgxpool.Pool, id string, versio
 		INSERT INTO drafts (draft_id, version, contact_id, recipient_email, subject, body, body_html, content_hash, preset_id, preset_revision)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING draft_id::text, version, contact_id::text, recipient_email,
-			subject, body, body_html, content_hash, created_at`,
+			subject, body, body_html, content_hash, created_at, preset_id, preset_revision`,
 		id, version+1, contactID, recipient, subject, body, bodyHTML, hash, presetID, presetRevision)
 	if err != nil {
 		return Draft{}, err
