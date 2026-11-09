@@ -123,6 +123,76 @@ func TestPostgresAccountsKeepIdentitiesSeparate(t *testing.T) {
 	}
 }
 
+func TestPostgresAccountsSetDefaultPreset(t *testing.T) {
+	pool := accountTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	accounts := PostgresAccounts{Pool: pool}
+	identity := GoogleIdentity{Subject: "preset-owner", Email: "owner@example.com"}
+	owner, err := accounts.Google(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := accounts.Google(ctx, GoogleIdentity{Subject: "preset-other", Email: "other@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner.DefaultPresetID != "prof" || other.DefaultPresetID != "prof" {
+		t.Fatal("new accounts did not receive the default preset")
+	}
+	for _, presetID := range []string{"prof", "warm_prof", "technical", "formal"} {
+		updated, err := accounts.SetDefaultPreset(ctx, strings.ToUpper(owner.ID), presetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.ID != owner.ID || updated.Username != owner.Username || updated.DefaultPresetID != presetID ||
+			updated.GoogleSubject != identity.Subject || updated.GoogleEmail != identity.Email {
+			t.Fatalf("unexpected updated account: %+v", updated)
+		}
+		stored, err := accounts.ByID(ctx, owner.ID)
+		if err != nil || stored.DefaultPresetID != presetID {
+			t.Fatalf("preset was not persisted: %q %v", stored.DefaultPresetID, err)
+		}
+		unchanged, err := accounts.ByID(ctx, other.ID)
+		if err != nil || unchanged.DefaultPresetID != "prof" {
+			t.Fatalf("another account's preset changed: %q %v", unchanged.DefaultPresetID, err)
+		}
+	}
+	for _, presetID := range []string{"", "unknown", "Formal", " formal "} {
+		if _, err := accounts.SetDefaultPreset(ctx, owner.ID, presetID); !errors.Is(err, ErrInvalidPreset) {
+			t.Fatalf("invalid preset %q: %v", presetID, err)
+		}
+	}
+	for _, accountID := range []string{"", "not-a-uuid", " " + owner.ID} {
+		if _, err := accounts.SetDefaultPreset(ctx, accountID, "prof"); err == nil {
+			t.Fatalf("invalid account ID accepted: %q", accountID)
+		}
+	}
+	if _, err := accounts.SetDefaultPreset(ctx, testID, "prof"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("missing account accepted: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO accounts (account_id, username, legacy_reserved)
+		VALUES ($1, '__legacy_owner__', true)`, workspace.LegacyAccountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.SetDefaultPreset(ctx, workspace.LegacyAccountID, "formal"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("reserved account accepted: %v", err)
+	}
+	if err := accounts.RequestDeletion(ctx, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.SetDefaultPreset(ctx, owner.ID, "prof"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("account pending deletion accepted: %v", err)
+	}
+	var storedPreset string
+	if err := pool.QueryRow(ctx, "SELECT default_preset_id FROM accounts WHERE account_id=$1", owner.ID).Scan(&storedPreset); err != nil {
+		t.Fatal(err)
+	}
+	if storedPreset != "formal" {
+		t.Fatal("rejected updates changed the saved preset")
+	}
+}
+
 func TestPostgresAccountsHideAccountsPendingDeletion(t *testing.T) {
 	pool := accountTestPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/google", s.handleGoogleStart)
 	mux.HandleFunc("GET /oauth/google/sign-in/callback", s.handleGoogleSignInCallback)
 	mux.HandleFunc("GET /api/settings/account", s.protect(s.handleAccount))
+	mux.HandleFunc("PUT /api/settings/account/style", s.protect(s.handleDefaultPreset))
 	mux.HandleFunc("DELETE /api/settings/account", s.protect(s.handleDeleteAccount))
 	mux.HandleFunc("GET /api/settings/ai", s.protect(s.handleAIProviders))
 	mux.HandleFunc("GET /api/settings/ai/{provider}/models", s.protect(s.handleAIModels))

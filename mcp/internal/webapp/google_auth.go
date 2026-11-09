@@ -20,8 +20,10 @@ type googleAttempt struct {
 func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	account := contextAccount(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"google_available": s.config.GoogleAuth != nil,
-		"google_linked":    account.GoogleSubject != "", "google_email": account.GoogleEmail,
+		"google_available":  s.config.GoogleAuth != nil,
+		"google_linked":     account.GoogleSubject != "",
+		"google_email":      account.GoogleEmail,
+		"default_preset_id": account.DefaultPresetID,
 	})
 }
 

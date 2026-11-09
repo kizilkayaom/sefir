@@ -90,7 +90,10 @@ func (a *memoryAccounts) create(credentials ownerCredentials) (Account, error) {
 			return Account{}, ErrAccountConflict
 		}
 	}
-	account := Account{ID: fmt.Sprintf("aaaaaaaa-aaaa-4aaa-8aaa-%012d", len(a.items)+1), ownerCredentials: credentials}
+	account := Account{
+		ID:              fmt.Sprintf("aaaaaaaa-aaaa-4aaa-8aaa-%012d", len(a.items)+1),
+		DefaultPresetID: "prof", ownerCredentials: credentials,
+	}
 	a.items[account.ID] = account
 	return account, nil
 }
@@ -151,8 +154,32 @@ func (a *memoryAccounts) ImportLegacy(_ context.Context, owner *ownerCredentials
 	if _, exists := a.items[workspace.LegacyAccountID]; exists {
 		return nil
 	}
-	a.items[workspace.LegacyAccountID] = Account{ID: workspace.LegacyAccountID, ownerCredentials: *owner}
+	a.items[workspace.LegacyAccountID] = Account{
+		ID: workspace.LegacyAccountID, DefaultPresetID: "prof", ownerCredentials: *owner,
+	}
 	return nil
+}
+
+func (a *memoryAccounts) SetDefaultPreset(ctx context.Context, accountID, presetID string) (Account, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := validateDefaultPreset(accountID, presetID); err != nil {
+		return Account{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return Account{}, err
+	}
+	if a.err != nil {
+		return Account{}, a.err
+	}
+	accountID = strings.ToLower(accountID)
+	account, exists := a.items[accountID]
+	if !exists || a.deletionRequested[accountID] {
+		return Account{}, pgx.ErrNoRows
+	}
+	account.DefaultPresetID = presetID
+	a.items[accountID] = account
+	return account, nil
 }
 
 func (a *memoryAccounts) RequestDeletion(_ context.Context, accountID string) error {

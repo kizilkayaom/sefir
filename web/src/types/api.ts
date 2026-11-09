@@ -19,6 +19,7 @@ export type AccountStatus = {
   google_available: boolean
   google_linked: boolean
   google_email?: string
+  default_preset_id: string
 }
 
 export type AIProvider = {

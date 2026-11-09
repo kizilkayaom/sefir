@@ -51,6 +51,10 @@ async function mockAPI(page: Page) {
     googleError: false,
     googleAccountExists: true,
     googleRequests: [] as string[],
+    defaultPreset: 'prof',
+    presetRequests: [] as { preset_id: string }[],
+    presetSaveError: false,
+    presetSaveWait: null as Promise<void> | null,
     setupRequests: [] as Record<string, string>[],
     expired: false,
     drafts: [draft, missingRecipient],
@@ -124,7 +128,15 @@ async function mockAPI(page: Page) {
       state.authenticated = false
       return reply({ status: 'deletion_requested' }, 202)
     }
-    if (path === '/api/settings/account') return reply({ google_available: state.googleAvailable, google_linked: state.googleLinked, google_email: state.googleLinked ? 'owner@example.com' : '' })
+    if (path === '/api/settings/account') return reply({ google_available: state.googleAvailable, google_linked: state.googleLinked, google_email: state.googleLinked ? 'owner@example.com' : '', default_preset_id: state.defaultPreset })
+    if (path === '/api/settings/account/style' && method === 'PUT') {
+      const input = request.postDataJSON()
+      state.presetRequests.push(input)
+      if (state.presetSaveWait) await state.presetSaveWait
+      if (state.presetSaveError) return reply({ error: 'Database operation failed. Please try again.' }, 503)
+      state.defaultPreset = input.preset_id
+      return reply({ default_preset_id: state.defaultPreset })
+    }
     if (path === '/api/settings/ai') {
       if (state.providerError) return reply({ error: 'Could not load AI providers.' }, 503)
       const options = [
@@ -534,6 +546,54 @@ test('settings shows the connected account and session expiry returns to login',
   state.expired = true
   await page.getByRole('button', { name: 'Check connection' }).click()
   await expect(page.getByLabel('Password', { exact: true })).toBeVisible()
+})
+
+test('account writing style loads the saved preference and persists changes after refresh', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.defaultPreset = 'warm_prof'
+  let finishSave!: () => void
+  state.presetSaveWait = new Promise<void>((resolve) => { finishSave = resolve })
+  await page.goto('/#settings')
+  const preset = page.getByLabel('Default writing style')
+  await expect(preset).toHaveValue('warm_prof')
+  await preset.selectOption('formal')
+  await page.getByRole('button', { name: 'Save writing style' }).click()
+  try {
+    await expect(page.getByRole('button', { name: 'Saving…', exact: true })).toBeDisabled()
+    await expect(preset).toBeDisabled()
+    await expect.poll(() => state.presetRequests).toEqual([{ preset_id: 'formal' }])
+    expect(state.defaultPreset).toBe('warm_prof')
+  } finally {
+    finishSave()
+  }
+  await expect(page.getByRole('status').filter({ hasText: 'Default writing style saved.' })).toBeVisible()
+  await expect(preset).toBeEnabled()
+  await expect(preset).toHaveValue('formal')
+  await page.reload()
+  await expect(preset).toHaveValue('formal')
+  expect(state.presetRequests).toEqual([{ preset_id: 'formal' }])
+})
+
+test('a failed writing style save preserves the selection for retry', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.presetSaveError = true
+  await page.goto('/#settings')
+  const preset = page.getByLabel('Default writing style')
+  await expect(preset).toHaveValue('prof')
+  await preset.selectOption('technical')
+  await page.getByRole('button', { name: 'Save writing style' }).click()
+  await expect(page.getByRole('alert')).toContainText('Database operation failed.')
+  await expect(preset).toHaveValue('technical')
+  await expect(preset).toBeEnabled()
+  await expect(page.getByText('Default writing style saved.', { exact: true })).toHaveCount(0)
+  expect(state.defaultPreset).toBe('prof')
+  state.presetSaveError = false
+  await page.getByRole('button', { name: 'Save writing style' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Default writing style saved.' })).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(preset).toHaveValue('technical')
+  expect(state.presetRequests).toEqual([{ preset_id: 'technical' }, { preset_id: 'technical' }])
+  expect(state.defaultPreset).toBe('technical')
 })
 
 test('the operator can save, replace, and remove shared AI configuration', async ({ page }) => {

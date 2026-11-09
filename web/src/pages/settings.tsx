@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { AuthNotice } from '@/components/auth-notice'
 import { AISettingsPanel } from '@/components/ai-settings'
 import { GoogleSignIn } from '@/components/google-sign-in'
+import { WritingStyleSettings } from '@/components/writing-style-settings'
 import { useResource } from '@/hooks/use-resource'
 import { api, errorMessage } from '@/lib/api'
 import { repositoryURL, setupGuideURL } from '@/lib/project'
@@ -18,6 +19,7 @@ export function SettingsPage({ onDeleted }: { onDeleted: () => void }) {
   const [confirmation, setConfirmation] = useState('')
   const [deleting, setDeleting] = useState(false)
   const [deletionError, setDeletionError] = useState('')
+  const [styleMessage, setStyleMessage] = useState('')
   const result = new URLSearchParams(window.location.search).get('gmail')
   const notices: Record<string, string> = {
     connected: 'Gmail authorization saved.',
@@ -53,6 +55,11 @@ export function SettingsPage({ onDeleted }: { onDeleted: () => void }) {
     }
   }
 
+  function styleSaved() {
+    setStyleMessage('Default writing style saved.')
+    account.reload()
+  }
+
   return (
     <div className="max-w-2xl">
       <h1 className="text-3xl font-semibold">Settings</h1>
@@ -79,6 +86,11 @@ export function SettingsPage({ onDeleted }: { onDeleted: () => void }) {
         </div>
       </section>
       <AISettingsPanel />
+      <section className="mt-6 space-y-4 rounded-xl border bg-card p-6">
+        <h2 className="text-xl font-semibold">Writing style</h2>
+        {styleMessage && <p role="status" className="text-sm">{styleMessage}</p>}
+        {account.data && <WritingStyleSettings key={account.data.default_preset_id} current={account.data.default_preset_id} onSaved={styleSaved} />}
+      </section>
       <section className="mt-6 space-y-4 rounded-xl border bg-card p-6">
         <h2 className="text-xl font-semibold">Your workspace and data</h2>
         <p className="text-sm leading-6 text-muted-foreground">This instance stores your account, contacts, draft versions, delivery records, and Gmail connection. AI drafting sends your supplied résumé text and contact details to your selected provider. OpenRouter also forwards them to the provider serving your selected model. Approved emails are sent through Gmail.</p>

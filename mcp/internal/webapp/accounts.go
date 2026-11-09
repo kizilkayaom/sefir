@@ -15,9 +15,11 @@ import (
 )
 
 var ErrAccountConflict = errors.New("username or Google account is already in use")
+var ErrInvalidPreset = errors.New("unsupported writing style")
 
 type Account struct {
-	ID string
+	ID              string
+	DefaultPresetID string
 	ownerCredentials
 }
 
@@ -33,6 +35,7 @@ type Accounts interface {
 	Create(context.Context, ownerCredentials) (Account, error)
 	Google(context.Context, GoogleIdentity) (Account, error)
 	LinkGoogle(context.Context, string, GoogleIdentity) (Account, error)
+	SetDefaultPreset(context.Context, string, string) (Account, error)
 	ImportLegacy(context.Context, *ownerCredentials) error
 	RequestDeletion(context.Context, string) error
 	WithActiveAccount(context.Context, string, func() error) error
@@ -62,12 +65,12 @@ func (a PostgresAccounts) WithActiveAccount(ctx context.Context, accountID strin
 }
 
 const accountColumns = `account_id::text, username, password_salt, password_hash,
-	COALESCE(google_subject, ''), COALESCE(google_email, '')`
+	COALESCE(google_subject, ''), COALESCE(google_email, ''), default_preset_id`
 
 func scanAccount(row pgx.Row) (Account, error) {
 	var account Account
 	account.Version = 1
-	err := row.Scan(&account.ID, &account.Username, &account.Salt, &account.Hash, &account.GoogleSubject, &account.GoogleEmail)
+	err := row.Scan(&account.ID, &account.Username, &account.Salt, &account.Hash, &account.GoogleSubject, &account.GoogleEmail, &account.DefaultPresetID)
 	var constraint *pgconn.PgError
 	if errors.As(err, &constraint) && constraint.Code == "23505" {
 		err = ErrAccountConflict
@@ -418,4 +421,29 @@ func (a PostgresAccounts) DeletionRuns(ctx context.Context, accountID string) ([
 		return nil, err
 	}
 	return runs, nil
+}
+
+func (a PostgresAccounts) SetDefaultPreset(
+	ctx context.Context,
+	accountID, presetID string,
+) (Account, error) {
+	if err := validateDefaultPreset(accountID, presetID); err != nil {
+		return Account{}, err
+	}
+	return scanAccount(a.Pool.QueryRow(ctx, `
+		UPDATE accounts SET default_preset_id=$2
+		WHERE account_id=$1 AND NOT legacy_reserved AND deletion_requested_at IS NULL
+		RETURNING `+accountColumns, accountID, presetID))
+}
+
+func validateDefaultPreset(accountID, presetID string) error {
+	if !uuidPattern.MatchString(accountID) {
+		return errors.New("valid account ID is required")
+	}
+	switch presetID {
+	case "prof", "warm_prof", "technical", "formal":
+		return nil
+	default:
+		return ErrInvalidPreset
+	}
 }
