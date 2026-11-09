@@ -143,6 +143,15 @@ func TestPostgresWebFlow(t *testing.T) {
 	if err != nil || richDraft.Body != "Written by hand" || richDraft.BodyHTML == "" {
 		t.Fatalf("manual formatted draft: %+v %v", richDraft, err)
 	}
+	var storedPreset *string
+	var storedRevision *int
+	if err := pool.QueryRow(ctx, "SELECT preset_id, preset_revision FROM drafts WHERE draft_id=$1 AND version=$2",
+		richDraft.DraftID, richDraft.Version).Scan(&storedPreset, &storedRevision); err != nil {
+		t.Fatal(err)
+	}
+	if storedPreset != nil || storedRevision != nil {
+		t.Fatal("manual draft received writing style metadata")
+	}
 	richApproval, err := email.ApproveDraft(ctx, pool, email.ApproveDraftInput{
 		ApprovalID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 		DraftID:    richDraft.DraftID, Version: 1, ContentHash: richDraft.ContentHash, ApprovedBy: "Owner",
@@ -159,5 +168,21 @@ func TestPostgresWebFlow(t *testing.T) {
 	}
 	if _, err := email.GetApprovedDraft(ctx, pool, richApproval.OutboxID); err == nil {
 		t.Fatal("delivery accepted HTML changed after approval")
+	}
+
+	preset, revision := "formal", 2
+	styledDraft, err := store.CreateDraft(ctx, catalogue.CreateDraftInput{
+		ContactID: contact.ID, Subject: "Styled draft", Body: "Fictional test email",
+		PresetID: &preset, PresetRevision: &revision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT preset_id, preset_revision FROM drafts WHERE draft_id=$1 AND version=$2",
+		styledDraft.DraftID, styledDraft.Version).Scan(&storedPreset, &storedRevision); err != nil {
+		t.Fatal(err)
+	}
+	if storedPreset == nil || *storedPreset != preset || storedRevision == nil || *storedRevision != revision {
+		t.Fatal("draft writing style metadata was not saved")
 	}
 }

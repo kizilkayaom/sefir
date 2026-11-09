@@ -9,7 +9,7 @@ import { useUnsavedChanges } from '@/hooks/use-unsaved-changes'
 import { api, errorMessage } from '@/lib/api'
 import { emailFits } from '@/lib/email-content'
 import type { EmailContent } from '@/lib/email-content'
-import type { AISettings, Contact, Page } from '@/types/api'
+import type { AccountStatus, AISettings, Contact, Page } from '@/types/api'
 import type { Draft } from '@/types/draft'
 
 export function GeneratePage({ contact, onCreated }: { contact: Contact | null, onCreated: (draft: Draft) => void }) {
@@ -17,8 +17,10 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
   const [offset, setOffset] = useState(0)
   const contacts = useResource<Page<Contact>>(`/api/contacts?limit=25&offset=${offset}`)
   const ai = useResource<AISettings>('/api/settings/ai')
+  const account = useResource<AccountStatus>('/api/settings/account')
   const [provider, setProvider] = useState('')
-  const [presetID, setPresetID] = useState('prof')
+  const [presetOverride, setPresetOverride] = useState('')
+  const presetID = presetOverride || account.data?.default_preset_id || ''
   const providerID = provider || ai.data?.default_provider || ''
   const selectedProvider = ai.data?.providers.find((item) => item.id === providerID)
   const [cv, setCV] = useState('')
@@ -33,7 +35,7 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
 
   async function generate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!selected || busy || (mode === 'generate' && !selectedProvider)) return
+    if (!selected || busy || (mode === 'generate' && (!selectedProvider || !account.data))) return
     setBusy(true)
     setError('')
     try {
@@ -87,15 +89,17 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
               <p id="provider-data-notice" className="mt-2 text-sm leading-6 text-muted-foreground">{selectedProvider ? `Generating this draft sends your résumé text and selected contact's details to ${selectedProvider.name}.` : 'Choose which provider receives your résumé text and contact details.'}</p>
               {selectedProvider?.id === 'openrouter' && <p className="mt-2 text-sm leading-6 text-muted-foreground">OpenRouter forwards this information to the provider serving your selected model.</p>}
             </div>}
-            <div>
+            {account.loading && <p role="status">Loading writing style…</p>}
+            {account.error && <div className="space-y-2"><p role="alert" className="text-destructive">{account.error}</p><Button type="button" variant="outline" disabled={busy} onClick={account.reload}>Retry writing style</Button></div>}
+            {account.data && <div>
               <label htmlFor="draft-preset" className="block text-sm font-medium">Writing style</label>
-              <select id="draft-preset" className="field mt-2" required disabled={busy} value={presetID} onChange={(event) => { setPresetID(event.target.value); setError('') }}>
+              <select id="draft-preset" className="field mt-2" required disabled={busy} value={presetID} onChange={(event) => { setPresetOverride(event.target.value); setError('') }}>
                 <option value="prof">Concise professional</option>
                 <option value="warm_prof">Warm professional</option>
                 <option value="technical">Technical and direct</option>
                 <option value="formal">Formal</option>
               </select>
-            </div>
+            </div>}
             <label className="block text-sm font-medium">Résumé text
               <textarea className="field mt-2 min-h-64" required maxLength={100000} disabled={busy} value={cv} onChange={(event) => setCV(event.target.value)} placeholder="Paste your résumé as plain text." />
             </label>
@@ -111,7 +115,7 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
         )}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {busy && <p role="status" className="text-sm">{mode === 'generate' ? 'Generating your draft. This may take a minute.' : 'Saving your draft…'}</p>}
-        <Button type="submit" disabled={busy || !selected || (mode === 'generate' ? !cv.trim() || !selectedProvider : !subject.trim() || !emailFits(content))}>
+        <Button type="submit" disabled={busy || !selected || (mode === 'generate' ? !cv.trim() || !selectedProvider || !account.data : !subject.trim() || !emailFits(content))}>
           {mode === 'generate' ? (busy ? 'Generating…' : 'Generate draft') : (busy ? 'Saving…' : 'Save draft')}
         </Button>
       </form>

@@ -125,7 +125,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.PresetID == "" {
-		input.PresetID = "prof"
+		input.PresetID = contextAccount(r.Context()).DefaultPresetID
 	}
 	switch input.PresetID {
 	case "prof", "warm_prof", "technical", "formal":

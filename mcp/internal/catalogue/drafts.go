@@ -24,10 +24,12 @@ type Draft struct {
 }
 
 type CreateDraftInput struct {
-	ContactID string `json:"contact_id"`
-	Subject   string `json:"subject"`
-	Body      string `json:"body"`
-	BodyHTML  string `json:"body_html,omitempty"`
+	ContactID      string  `json:"contact_id"`
+	Subject        string  `json:"subject"`
+	Body           string  `json:"body"`
+	BodyHTML       string  `json:"body_html,omitempty"`
+	PresetID       *string `json:"preset_id,omitempty"`
+	PresetRevision *int    `json:"preset_revision,omitempty"`
 }
 
 func CreateDraft(
@@ -44,6 +46,17 @@ func CreateDraft(
 	if input.ContactID == "" {
 		return Draft{}, errors.New("contact_id is required")
 	}
+	if (input.PresetID == nil) != (input.PresetRevision == nil) {
+		return Draft{}, errors.New("preset_id and preset_revision must be provided together")
+	}
+	if input.PresetID != nil {
+		if strings.TrimSpace(*input.PresetID) == "" {
+			return Draft{}, errors.New("preset_id must not be blank")
+		}
+		if *input.PresetRevision < 1 {
+			return Draft{}, errors.New("preset_revision must be at least 1")
+		}
+	}
 
 	contact, err := GetConfirmedContact(ctx, pool, input.ContactID)
 	if err != nil {
@@ -56,8 +69,8 @@ func CreateDraft(
 	}
 
 	const query = `
-		INSERT INTO drafts (contact_id, recipient_email, subject, body, body_html, content_hash)
-		SELECT id, email, $3, $4, $5, $6
+		INSERT INTO drafts (contact_id, recipient_email, subject, body, body_html, content_hash, preset_id, preset_revision)
+		SELECT id, email, $3, $4, $5, $6, $7, $8
 		FROM contacts
 		WHERE id = $1
 			AND status = 'confirmed'
@@ -69,6 +82,7 @@ func CreateDraft(
 	var draft Draft
 	err = pool.QueryRow(
 		ctx, query, contact.ID, contact.Email, input.Subject, input.Body, input.BodyHTML, contentHash,
+		input.PresetID, input.PresetRevision,
 	).Scan(
 		&draft.DraftID,
 		&draft.Version,

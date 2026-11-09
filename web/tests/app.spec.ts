@@ -52,6 +52,8 @@ async function mockAPI(page: Page) {
     googleAccountExists: true,
     googleRequests: [] as string[],
     defaultPreset: 'prof',
+    accountError: false,
+    accountWait: null as Promise<void> | null,
     presetRequests: [] as { preset_id: string }[],
     presetSaveError: false,
     presetSaveWait: null as Promise<void> | null,
@@ -128,7 +130,11 @@ async function mockAPI(page: Page) {
       state.authenticated = false
       return reply({ status: 'deletion_requested' }, 202)
     }
-    if (path === '/api/settings/account') return reply({ google_available: state.googleAvailable, google_linked: state.googleLinked, google_email: state.googleLinked ? 'owner@example.com' : '', default_preset_id: state.defaultPreset })
+    if (path === '/api/settings/account') {
+      if (state.accountWait) await state.accountWait
+      if (state.accountError) return reply({ error: 'Could not load account settings.' }, 503)
+      return reply({ google_available: state.googleAvailable, google_linked: state.googleLinked, google_email: state.googleLinked ? 'owner@example.com' : '', default_preset_id: state.defaultPreset })
+    }
     if (path === '/api/settings/account/style' && method === 'PUT') {
       const input = request.postDataJSON()
       state.presetRequests.push(input)
@@ -443,17 +449,52 @@ test('an OpenAI-only installation uses its configured default', async ({ page })
   expect(state.generationRequests[0].provider).toBe('openai')
 })
 
-test('manual drafting remains available without any AI provider', async ({ page }) => {
+test('draft generation waits for the saved writing style and retries account loading', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.defaultPreset = 'formal'
+  state.accountError = true
+  let finishLoading!: () => void
+  state.accountWait = new Promise<void>((resolve) => { finishLoading = resolve })
+  await page.goto('/#new')
+  try {
+    await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+    await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
+    await expect(page.getByLabel('AI provider')).toHaveValue('cohere')
+    await expect(page.getByText('Loading writing style…', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Writing style')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Generate draft' })).toBeDisabled()
+    await page.locator('form').dispatchEvent('submit')
+    expect(state.generationRequests).toHaveLength(0)
+  } finally {
+    finishLoading()
+  }
+  await expect(page.getByRole('alert')).toHaveText('Could not load account settings.')
+  await expect(page.getByRole('button', { name: 'Generate draft' })).toBeDisabled()
+  state.accountError = false
+  await page.getByRole('button', { name: 'Retry writing style' }).click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByLabel('Writing style')).toHaveValue('formal')
+  await page.getByRole('button', { name: 'Generate draft' }).click()
+  await expect(page.getByRole('heading', { name: draft.subject })).toBeVisible()
+  expect(state.generationRequests).toHaveLength(1)
+  expect(state.generationRequests[0].preset_id).toBe('formal')
+  expect(state.presetRequests).toHaveLength(0)
+})
+
+test('manual drafting remains available without an AI provider or account settings', async ({ page }) => {
   const state = await mockAPI(page)
   state.providers = []
   state.defaultProvider = null
+  state.accountError = true
   await page.goto('/#new')
   await expect(page.getByText('AI generation is not configured on this installation. You can still choose Write yourself.')).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveText('Could not load account settings.')
   await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
   await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
   await expect(page.getByRole('button', { name: 'Generate draft' })).toBeDisabled()
   await page.getByRole('button', { name: 'Write yourself' }).click()
   await expect(page.getByLabel('Writing style')).toHaveCount(0)
+  await expect(page.getByRole('alert')).toHaveCount(0)
   await page.getByLabel('Subject', { exact: true }).fill('A manual draft')
   await page.getByRole('textbox', { name: 'Email body' }).fill('A fictional introduction.')
   await page.getByRole('button', { name: 'Save draft', exact: true }).click()
@@ -465,6 +506,7 @@ test('manual drafting remains available without any AI provider', async ({ page 
 
 test('AI configuration errors can be retried and generation failures preserve the choice', async ({ page }) => {
   const state = await mockAPI(page)
+  state.defaultPreset = 'warm_prof'
   state.providerError = true
   await page.goto('/#new')
   await expect(page.getByRole('alert')).toHaveText('Could not load AI providers.')
@@ -472,6 +514,7 @@ test('AI configuration errors can be retried and generation failures preserve th
   state.providerError = false
   await page.getByRole('button', { name: 'Retry AI providers' }).click()
   await page.getByLabel('AI provider').selectOption('anthropic')
+  await expect(page.getByLabel('Writing style')).toHaveValue('warm_prof')
   await page.getByLabel('Writing style').selectOption('formal')
   await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
   await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
@@ -490,6 +533,8 @@ test('AI configuration errors can be retried and generation failures preserve th
   expect(state.generationRequests).toHaveLength(2)
   expect(state.generationRequests[1].provider).toBe('anthropic')
   expect(state.generationRequests[1].preset_id).toBe('formal')
+  expect(state.defaultPreset).toBe('warm_prof')
+  expect(state.presetRequests).toHaveLength(0)
   expect(state.approvalRequests).toHaveLength(0)
 })
 

@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -146,12 +147,17 @@ func TestGenerationUsesSelectedPreset(t *testing.T) {
 		{name: "warm professional", extra: `,"preset_id":"warm_prof"`, want: "warm_prof"},
 		{name: "technical", extra: `,"preset_id":"technical"`, want: "technical"},
 		{name: "formal", extra: `,"preset_id":"formal"`, want: "formal"},
-		{name: "omitted", want: "prof"},
-		{name: "empty", extra: `,"preset_id":""`, want: "prof"},
+		{name: "omitted", want: "warm_prof"},
+		{name: "empty", extra: `,"preset_id":""`, want: "warm_prof"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server, store, bridge, _ := fixture(t)
 			cookie, csrf := login(t, server)
+			accountID := server.sessions[cookie.Value].AccountID
+			_, err := server.accounts.SetDefaultPreset(context.Background(), accountID, "warm_prof")
+			if err != nil {
+				t.Fatalf("set default preset for account %s: %v", accountID, err)
+			}
 			bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body"}`)
 			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","provider":"anthropic"` + test.extra + `}`
 			response := request(server, "POST", "/api/drafts", body, cookie, csrf)
