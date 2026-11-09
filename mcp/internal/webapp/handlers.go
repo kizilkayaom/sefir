@@ -160,9 +160,11 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var generated struct {
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-		Error   string `json:"error"`
+		Subject        string `json:"subject"`
+		Body           string `json:"body"`
+		Error          string `json:"error"`
+		PresetID       string `json:"preset_id"`
+		PresetRevision int    `json:"preset_revision"`
 	}
 	if json.Unmarshal(result, &generated) != nil {
 		fail(w, http.StatusBadGateway, "The model returned an invalid draft")
@@ -170,6 +172,10 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	if generated.Error == "provider_unavailable" {
 		fail(w, http.StatusUnprocessableEntity, "The selected AI provider is not configured. Check the server's API key and model settings.")
+		return
+	}
+	if generated.PresetID != input.PresetID || generated.PresetRevision < 1 || generated.PresetRevision > 2147483647 {
+		fail(w, http.StatusBadGateway, "The model returned an invalid draft")
 		return
 	}
 	if generated.Error != "" || strings.TrimSpace(generated.Subject) == "" ||
@@ -180,6 +186,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	draft, err := s.store.CreateDraft(ctx, catalogue.CreateDraftInput{
 		ContactID: input.ContactID, Subject: generated.Subject, Body: generated.Body,
+		PresetID: &generated.PresetID, PresetRevision: &generated.PresetRevision,
 	})
 	if err != nil {
 		storeError(w, err)

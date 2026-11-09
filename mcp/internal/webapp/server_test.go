@@ -323,14 +323,14 @@ func TestGenerationAndUnavailableStatus(t *testing.T) {
 		t.Fatal("unconfirmed contact drafted")
 	}
 	store.err = nil
-	bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body"}`)
+	bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body","preset_id":"prof","preset_revision":1}`)
 	if got := request(server, "POST", "/api/drafts", body, cookie, csrf).Code; got != 201 {
 		t.Fatal(got)
 	}
 	if store.draftInput.ContactID != testID || store.draftInput.Subject != "Hello" {
 		t.Fatal("draft not saved")
 	}
-	bridge.result = json.RawMessage(`{"subject":"","body":"Test body"}`)
+	bridge.result = json.RawMessage(`{"subject":"","body":"Test body","preset_id":"prof","preset_revision":1}`)
 	if got := request(server, "POST", "/api/drafts", body, cookie, csrf).Code; got != 502 {
 		t.Fatal(got)
 	}

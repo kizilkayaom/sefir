@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/kizilkayaom/sefir/mcp/internal/catalogue"
 )
 
 func TestOnlyOperatorCanManageSharedAISettings(t *testing.T) {
@@ -122,7 +124,7 @@ func TestGenerationUsesSelectedProvider(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			server, store, bridge, _ := fixture(t)
 			cookie, csrf := login(t, server)
-			bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body"}`)
+			bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body","preset_id":"prof","preset_revision":1}`)
 			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","provider":"` + provider + `"}`
 			if got := request(server, "POST", "/api/drafts", body, cookie, csrf).Code; got != 201 {
 				t.Fatal(got)
@@ -130,8 +132,9 @@ func TestGenerationUsesSelectedProvider(t *testing.T) {
 			if len(bridge.calls) != 1 || bridge.calls[0] != "generate" || bridge.payloads[0].(map[string]any)["provider"] != provider {
 				t.Fatal("selected provider was not forwarded")
 			}
-			if store.draftInput.Subject != "Hello" {
-				t.Fatal("draft was not saved")
+			if store.draftInput.Subject != "Hello" || store.draftInput.PresetID == nil || *store.draftInput.PresetID != "prof" ||
+				store.draftInput.PresetRevision == nil || *store.draftInput.PresetRevision != 1 {
+				t.Fatal("draft was not saved with its writing style metadata")
 			}
 		})
 	}
@@ -158,7 +161,7 @@ func TestGenerationUsesSelectedPreset(t *testing.T) {
 			if err != nil {
 				t.Fatalf("set default preset for account %s: %v", accountID, err)
 			}
-			bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body"}`)
+			bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body","preset_id":"` + test.want + `","preset_revision":2}`)
 			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","provider":"anthropic"` + test.extra + `}`
 			response := request(server, "POST", "/api/drafts", body, cookie, csrf)
 			if response.Code != 201 {
@@ -172,6 +175,56 @@ func TestGenerationUsesSelectedPreset(t *testing.T) {
 			}
 			if store.draftInput.ContactID != testID || store.draftInput.Subject != "Hello" || store.draftInput.Body != "Test body" {
 				t.Fatal("generated draft was not saved")
+			}
+			if store.draftInput.PresetID == nil || *store.draftInput.PresetID != test.want ||
+				store.draftInput.PresetRevision == nil || *store.draftInput.PresetRevision != 2 {
+				t.Fatal("generated draft lost its writing style metadata")
+			}
+		})
+	}
+}
+
+func TestGenerationRejectsInvalidPresetMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		extra string
+	}{
+		{name: "missing metadata"},
+		{name: "missing preset", extra: `,"preset_revision":2`},
+		{name: "missing revision", extra: `,"preset_id":"formal"`},
+		{name: "null preset", extra: `,"preset_id":null,"preset_revision":2`},
+		{name: "null revision", extra: `,"preset_id":"formal","preset_revision":null`},
+		{name: "empty preset", extra: `,"preset_id":"","preset_revision":2`},
+		{name: "mismatched preset", extra: `,"preset_id":"prof","preset_revision":2`},
+		{name: "unknown preset", extra: `,"preset_id":"unknown","preset_revision":2`},
+		{name: "zero revision", extra: `,"preset_id":"formal","preset_revision":0`},
+		{name: "negative revision", extra: `,"preset_id":"formal","preset_revision":-1`},
+		{name: "revision overflow", extra: `,"preset_id":"formal","preset_revision":2147483648`},
+		{name: "invalid revision type", extra: `,"preset_id":"formal","preset_revision":"2"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, store, bridge, _ := fixture(t)
+			cookie, csrf := login(t, server)
+			bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body"` + test.extra + `}`)
+			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","preset_id":"formal"}`
+			response := request(server, "POST", "/api/drafts", body, cookie, csrf)
+			if response.Code != 502 {
+				t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+			}
+			var result struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Error != "The model returned an invalid draft" {
+				t.Fatalf("unexpected error: %q", result.Error)
+			}
+			if len(bridge.calls) != 1 || bridge.calls[0] != "generate" {
+				t.Fatal("draft generation was not called exactly once")
+			}
+			if store.draftInput != (catalogue.CreateDraftInput{}) {
+				t.Fatal("invalid writing style metadata reached draft storage")
 			}
 		})
 	}
