@@ -39,9 +39,11 @@ func SaveDraftVersion(ctx context.Context, pool *pgxpool.Pool, id string, versio
 	defer tx.Rollback(ctx)
 	var contactID, storedHash string
 	var recipient *string
+	var presetID *string
+	var presetRevision *int
 	err = tx.QueryRow(ctx, `
-		SELECT contact_id::text, recipient_email, content_hash FROM drafts
-		WHERE draft_id = $1 AND version = $2 FOR UPDATE`, id, version).Scan(&contactID, &recipient, &storedHash)
+		SELECT contact_id::text, recipient_email, content_hash, preset_id, preset_revision FROM drafts
+		WHERE draft_id = $1 AND version = $2 FOR UPDATE`, id, version).Scan(&contactID, &recipient, &storedHash, &presetID, &presetRevision)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -60,11 +62,11 @@ func SaveDraftVersion(ctx context.Context, pool *pgxpool.Pool, id string, versio
 		return Draft{}, err
 	}
 	rows, err := tx.Query(ctx, `
-		INSERT INTO drafts (draft_id, version, contact_id, recipient_email, subject, body, body_html, content_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO drafts (draft_id, version, contact_id, recipient_email, subject, body, body_html, content_hash, preset_id, preset_revision)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING draft_id::text, version, contact_id::text, recipient_email,
 			subject, body, body_html, content_hash, created_at`,
-		id, version+1, contactID, recipient, subject, body, bodyHTML, hash)
+		id, version+1, contactID, recipient, subject, body, bodyHTML, hash, presetID, presetRevision)
 	if err != nil {
 		return Draft{}, err
 	}

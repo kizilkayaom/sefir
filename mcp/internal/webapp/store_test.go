@@ -185,4 +185,22 @@ func TestPostgresWebFlow(t *testing.T) {
 	if storedPreset == nil || *storedPreset != preset || storedRevision == nil || *storedRevision != revision {
 		t.Fatal("draft writing style metadata was not saved")
 	}
+	styledRevision, err := store.SaveDraftVersion(ctx, styledDraft.DraftID, styledDraft.Version, catalogue.EditDraftInput{
+		Subject: "Edited styled draft", Body: "Revised fictional test email", ContentHash: styledDraft.ContentHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if styledRevision.DraftID != styledDraft.DraftID || styledRevision.Version != styledDraft.Version+1 {
+		t.Fatal("editing did not create the expected draft version")
+	}
+	for _, version := range []int{styledDraft.Version, styledRevision.Version} {
+		if err := pool.QueryRow(ctx, "SELECT preset_id, preset_revision FROM drafts WHERE draft_id=$1 AND version=$2",
+			styledDraft.DraftID, version).Scan(&storedPreset, &storedRevision); err != nil {
+			t.Fatal(err)
+		}
+		if storedPreset == nil || *storedPreset != preset || storedRevision == nil || *storedRevision != revision {
+			t.Fatalf("draft version %d lost its writing style metadata", version)
+		}
+	}
 }
