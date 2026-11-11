@@ -12,6 +12,21 @@ import (
 	"github.com/kizilkayaom/sefir/mcp/internal/writingstyle"
 )
 
+func (s *Server) handleWritingStyles(w http.ResponseWriter, r *http.Request) {
+	limit, offset, ok := pagination(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	items, err := s.store.WritingStyles(ctx, limit+1, offset)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	page(w, items, limit, offset)
+}
+
 func (s *Server) handleUploadWritingStyle(w http.ResponseWriter, r *http.Request) {
 	const maxRequestBytes = 64 * 1024
 	const maxFileBytes = 32 * 1024

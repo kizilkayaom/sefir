@@ -55,6 +55,7 @@ type Store interface {
 	Activities(context.Context, int, int) ([]Activity, error)
 	DraftActivity(context.Context, string, int) (*Activity, error)
 	CreateWritingStyle(context.Context, writingstyle.Profile) (WritingStyleProfile, error)
+	WritingStyles(context.Context, int, int) ([]WritingStyleProfile, error)
 }
 
 type PostgresStore struct {

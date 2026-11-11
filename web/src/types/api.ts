@@ -22,6 +22,17 @@ export type AccountStatus = {
   default_preset_id: string
 }
 
+export type WritingStyleProfile = {
+  profile_id: string
+  name: string
+  language: string
+  content: string
+  format_version: number
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
 export type AIProvider = {
   id: 'cohere' | 'anthropic' | 'openai' | 'openrouter'
   name: string

@@ -136,3 +136,146 @@ func TestPostgresCreateWritingStyle(t *testing.T) {
 		t.Fatalf("other account's profile changed: %s %v", remainingID, err)
 	}
 }
+
+func TestWritingStylesRequiresAccount(t *testing.T) {
+	store := PostgresStore{}
+	for _, ctx := range []context.Context{
+		context.Background(),
+		withAccount(context.Background(), Account{ID: "not-a-uuid"}),
+	} {
+		profiles, err := store.WritingStyles(ctx, 25, 0)
+		if err == nil || err.Error() != "authenticated account is required" || len(profiles) != 0 {
+			t.Fatalf("account validation: %+v %v", profiles, err)
+		}
+	}
+}
+
+func TestWritingStylesRejectsInvalidPagination(t *testing.T) {
+	store := PostgresStore{}
+	ctx := withAccount(context.Background(), Account{ID: testID})
+	for _, test := range []struct {
+		limit  int
+		offset int
+	}{
+		{0, 0},
+		{-1, 0},
+		{102, 0},
+		{1, -1},
+		{1, 1000001},
+	} {
+		profiles, err := store.WritingStyles(ctx, test.limit, test.offset)
+		if err == nil || len(profiles) != 0 {
+			t.Fatalf("accepted limit=%d offset=%d: %+v %v", test.limit, test.offset, profiles, err)
+		}
+	}
+}
+
+func TestPostgresWritingStyles(t *testing.T) {
+	pool := accountTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, "CREATE TEMP TABLE writing_style_profiles (LIKE public.writing_style_profiles INCLUDING ALL)"); err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]string)
+	for _, name := range []string{"owner", "other", "reserved", "deleting", "empty"} {
+		var id string
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO accounts (username, legacy_reserved, deletion_requested_at)
+			VALUES ($1, $2, CASE WHEN $3::boolean THEN now() ELSE NULL END)
+			RETURNING account_id::text`, name, name == "reserved", name == "deleting").Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = id
+	}
+	created := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	want := make(map[string]WritingStyleProfile)
+	for i, seed := range []struct {
+		name      string
+		account   string
+		id        string
+		createdAt time.Time
+	}{
+		{"first", "owner", "20000000-0000-4000-8000-000000000001", created},
+		{"second", "owner", "10000000-0000-4000-8000-000000000001", created},
+		{"old", "owner", "f0000000-0000-4000-8000-000000000001", created.Add(-time.Hour)},
+		{"other", "other", "40000000-0000-4000-8000-000000000001", created.Add(time.Hour)},
+		{"reserved", "reserved", "50000000-0000-4000-8000-000000000001", created},
+		{"deleting", "deleting", "60000000-0000-4000-8000-000000000001", created},
+	} {
+		profile := WritingStyleProfile{
+			ProfileID: seed.id, Name: seed.name, Language: "tr", Content: "## Style\nDoğrudan yaz: " + seed.name,
+			FormatVersion: 1, Revision: i + 1, CreatedAt: seed.createdAt, UpdatedAt: seed.createdAt.Add(time.Minute),
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO writing_style_profiles (profile_id, account_id, name, language, content,
+				format_version, revision, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, profile.ProfileID, ids[seed.account],
+			profile.Name, profile.Language, profile.Content, profile.FormatVersion,
+			profile.Revision, profile.CreatedAt, profile.UpdatedAt); err != nil {
+			t.Fatal(err)
+		}
+		want[seed.name] = profile
+	}
+	store := PostgresStore{Pool: pool}
+	ids["missing"] = testID
+	for _, test := range []struct {
+		name    string
+		account string
+		limit   int
+		offset  int
+		want    []string
+	}{
+		{"all profiles", "owner", 25, 0, []string{"first", "second", "old"}},
+		{"first page", "owner", 2, 0, []string{"first", "second"}},
+		{"second page", "owner", 2, 2, []string{"old"}},
+		{"single row", "owner", 1, 1, []string{"second"}},
+		{"past last page", "owner", 2, 3, nil},
+		{"maximum offset", "owner", 1, 1000000, nil},
+		{"other account", "other", 25, 0, []string{"other"}},
+		{"reserved account", "reserved", 25, 0, nil},
+		{"deleting account", "deleting", 25, 0, nil},
+		{"missing account", "missing", 25, 0, nil},
+		{"empty account", "empty", 25, 0, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profiles, err := store.WritingStyles(withAccount(ctx, Account{ID: ids[test.account]}), test.limit, test.offset)
+			if err != nil || len(profiles) != len(test.want) {
+				t.Fatalf("listed %d profiles, want %d: %v", len(profiles), len(test.want), err)
+			}
+			for i, name := range test.want {
+				got := profiles[i]
+				got.CreatedAt = got.CreatedAt.UTC()
+				got.UpdatedAt = got.UpdatedAt.UTC()
+				if got != want[name] {
+					t.Fatalf("profile %d: %+v, want %+v", i, profiles[i], want[name])
+				}
+			}
+		})
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO writing_style_profiles (account_id, name, language, content, created_at)
+		SELECT $1, 'Extra ' || n::text, 'en', 'Use clear language.', $2::timestamptz - n * interval '1 second'
+		FROM generate_series(1, 99) AS n`, ids["owner"], created.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	ownerCtx := withAccount(ctx, Account{ID: ids["owner"]})
+	profiles, err := store.WritingStyles(ownerCtx, 101, 0)
+	if err != nil || len(profiles) != 101 || profiles[0].ProfileID != want["first"].ProfileID {
+		t.Fatalf("maximum limit did not return the extra pagination row: %d %v", len(profiles), err)
+	}
+	profiles, err = store.WritingStyles(ownerCtx, 101, 101)
+	if err != nil || len(profiles) != 1 || profiles[0].Name != "Extra 99" {
+		t.Fatalf("last page: %+v %v", profiles, err)
+	}
+	if err := (PostgresAccounts{Pool: pool}).RequestDeletion(ctx, ids["owner"]); err != nil {
+		t.Fatal(err)
+	}
+	if profiles, err := store.WritingStyles(ownerCtx, 101, 0); err != nil || len(profiles) != 0 {
+		t.Fatalf("stale account context exposed deleting account's profiles: %d %v", len(profiles), err)
+	}
+	profiles, err = store.WritingStyles(withAccount(ctx, Account{ID: ids["other"]}), 25, 0)
+	if err != nil || len(profiles) != 1 || profiles[0].ProfileID != want["other"].ProfileID {
+		t.Fatalf("other account's profiles changed: %+v %v", profiles, err)
+	}
+}

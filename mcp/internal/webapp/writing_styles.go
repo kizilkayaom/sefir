@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -55,4 +56,31 @@ func (s PostgresStore) CreateWritingStyle(
 		return WritingStyleProfile{}, err
 	}
 	return saved, nil
+}
+
+func (s PostgresStore) WritingStyles(
+	ctx context.Context,
+	limit, offset int,
+) ([]WritingStyleProfile, error) {
+	accountID, err := contextAccountID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if limit < 1 || limit > 101 || offset < 0 || offset > 1000000 {
+		return nil, errors.New("limit must be between 1 and 101 and offset between 0 and 1000000")
+	}
+
+	rows, err := s.Pool.Query(ctx, `
+		SELECT p.profile_id::text, p.name, p.language, p.content, p.format_version,
+			p.revision, p.created_at, p.updated_at
+		FROM writing_style_profiles p
+		JOIN accounts a ON a.account_id=p.account_id
+		WHERE p.account_id=$1 AND NOT a.legacy_reserved AND a.deletion_requested_at IS NULL
+		ORDER BY p.created_at DESC, p.profile_id DESC
+		LIMIT $2 OFFSET $3`, accountID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return pgx.CollectRows(rows, pgx.RowToStructByName[WritingStyleProfile])
 }
