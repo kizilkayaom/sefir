@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/kizilkayaom/sefir/mcp/internal/catalogue"
+	"github.com/kizilkayaom/sefir/mcp/internal/writingstyle"
 )
 
 type Contact struct {
@@ -53,6 +54,7 @@ type Store interface {
 	SaveDraftVersion(context.Context, string, int, catalogue.EditDraftInput) (catalogue.Draft, error)
 	Activities(context.Context, int, int) ([]Activity, error)
 	DraftActivity(context.Context, string, int) (*Activity, error)
+	CreateWritingStyle(context.Context, writingstyle.Profile) (WritingStyleProfile, error)
 }
 
 type PostgresStore struct {

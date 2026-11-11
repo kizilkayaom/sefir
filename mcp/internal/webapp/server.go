@@ -125,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings/gmail", s.protect(s.handleGmailStatus))
 	mux.HandleFunc("POST /api/settings/gmail/connect", s.protect(s.handleGmailConnect))
 	mux.HandleFunc("GET /oauth/google/callback", s.protect(s.handleGmailCallback))
+	mux.HandleFunc("POST /api/settings/writing-styles", s.protect(s.handleUploadWritingStyle))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "Endpoint not found")
 	})

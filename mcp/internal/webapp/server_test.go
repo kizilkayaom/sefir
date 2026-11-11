@@ -12,22 +12,28 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/kizilkayaom/sefir/mcp/internal/catalogue"
+	"github.com/kizilkayaom/sefir/mcp/internal/writingstyle"
 )
 
 const testID = "11111111-1111-4111-8111-111111111111"
 const testPassword = "letter1!"
 
 type fakeStore struct {
-	draft       catalogue.Draft
-	err         error
-	activity    *Activity
-	saved       ContactInput
-	draftInput  catalogue.CreateDraftInput
-	editInput   catalogue.EditDraftInput
-	editID      string
-	editVersion int
-	limit       int
-	offset      int
+	draft                 catalogue.Draft
+	err                   error
+	activity              *Activity
+	saved                 ContactInput
+	draftInput            catalogue.CreateDraftInput
+	editInput             catalogue.EditDraftInput
+	editID                string
+	editVersion           int
+	limit                 int
+	offset                int
+	writingStyle          WritingStyleProfile
+	writingStyleInput     writingstyle.Profile
+	writingStyleAccountID string
+	writingStyleCalls     int
+	writingStyleDeadline  time.Time
 }
 
 func (f *fakeStore) Drafts(_ context.Context, limit, offset int) ([]catalogue.Draft, error) {
@@ -57,6 +63,14 @@ func (f *fakeStore) SaveDraftVersion(_ context.Context, id string, version int, 
 func (f *fakeStore) Activities(context.Context, int, int) ([]Activity, error) { return nil, f.err }
 func (f *fakeStore) DraftActivity(context.Context, string, int) (*Activity, error) {
 	return f.activity, f.err
+}
+
+func (f *fakeStore) CreateWritingStyle(ctx context.Context, profile writingstyle.Profile) (WritingStyleProfile, error) {
+	f.writingStyleInput = profile
+	f.writingStyleAccountID = contextAccount(ctx).ID
+	f.writingStyleCalls++
+	f.writingStyleDeadline, _ = ctx.Deadline()
+	return f.writingStyle, f.err
 }
 
 type fakeBridge struct {

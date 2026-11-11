@@ -1,0 +1,248 @@
+package webapp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/kizilkayaom/sefir/mcp/internal/writingstyle"
+)
+
+const validWritingStyleUpload = "---\nformat_version: 1\nname: Warm and direct\nlanguage: en\n---\n## Style\nUse short sentences.\n\n---\n\n    Keep this indentation.\n"
+
+type writingStyleUploadPart struct {
+	field    string
+	filename string
+	content  string
+}
+
+func writingStyleUploadBody(t *testing.T, parts ...writingStyleUploadPart) ([]byte, string) {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, part := range parts {
+		var output io.Writer
+		var err error
+		if part.filename == "" {
+			output, err = writer.CreateFormField(part.field)
+		} else {
+			output, err = writer.CreateFormFile(part.field, part.filename)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(output, part.content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return body.Bytes(), writer.FormDataContentType()
+}
+
+func writingStyleUploadRequest(body []byte, contentType string, cookie *http.Cookie, csrf string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/settings/writing-styles", bytes.NewReader(body))
+	r.Header.Set("Origin", "http://localhost:8080")
+	r.Header.Set("Content-Type", contentType)
+	r.Header.Set("X-CSRF-Token", csrf)
+	if cookie != nil {
+		r.AddCookie(cookie)
+	}
+	return r
+}
+
+func TestUploadWritingStyle(t *testing.T) {
+	server, store, bridge, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	accountID := server.sessions[cookie.Value].AccountID
+	content := "## Style\nUse short sentences.\n\n---\n\n    Keep this indentation.\n"
+	created := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	store.writingStyle = WritingStyleProfile{
+		ProfileID: testID, Name: "Warm and direct", Language: "en", Content: content,
+		FormatVersion: 1, Revision: 1, CreatedAt: created, UpdatedAt: created,
+	}
+	for _, test := range []struct {
+		name       string
+		file       string
+		maxRequest bool
+		streamed   bool
+	}{
+		{name: "valid upload", file: validWritingStyleUpload},
+		{
+			name: "32 KiB file",
+			file: strings.Replace(validWritingStyleUpload, "\n---\n", "\n# "+strings.Repeat("x", 32*1024-len(validWritingStyleUpload)-3)+"\n---\n", 1),
+		},
+		{name: "64 KiB request", file: validWritingStyleUpload, maxRequest: true},
+		{name: "64 KiB request without length", file: validWritingStyleUpload, maxRequest: true, streamed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, contentType := writingStyleUploadBody(t, writingStyleUploadPart{"profile", "style.MD", test.file})
+			if test.maxRequest {
+				body = append(body, bytes.Repeat([]byte(" "), 64*1024-len(body))...)
+			}
+			r := writingStyleUploadRequest(body, contentType, cookie, csrf)
+			if test.streamed {
+				r.ContentLength = -1
+			}
+			before := time.Now()
+			calls := store.writingStyleCalls
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, r)
+			if response.Code != http.StatusCreated {
+				t.Fatalf("upload: %d %s", response.Code, response.Body.String())
+			}
+			var saved WritingStyleProfile
+			if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved != store.writingStyle {
+				t.Fatalf("response lost saved profile metadata: %+v", saved)
+			}
+			want := writingstyle.Profile{FormatVersion: 1, Name: "Warm and direct", Language: "en", Content: content}
+			if store.writingStyleCalls != calls+1 || store.writingStyleInput != want || store.writingStyleAccountID != accountID {
+				t.Fatalf("wrong saved profile or account: %+v %s", store.writingStyleInput, store.writingStyleAccountID)
+			}
+			if store.writingStyleDeadline.Before(before) || store.writingStyleDeadline.After(time.Now().Add(5*time.Second)) {
+				t.Fatal("storage did not receive a five-second deadline")
+			}
+			if r.MultipartForm != nil || len(bridge.calls) != 0 {
+				t.Fatal("upload used disk-backed form parsing or called the AI bridge")
+			}
+		})
+	}
+}
+
+func TestUploadWritingStyleRejectsInvalidRequests(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	file := writingStyleUploadPart{"profile", "style.md", validWritingStyleUpload}
+	for _, test := range []struct {
+		name        string
+		parts       []writingStyleUploadPart
+		contentType string
+		truncate    bool
+		preamble    bool
+		padding     int
+		streamed    bool
+		status      int
+	}{
+		{name: "JSON body", parts: []writingStyleUploadPart{file}, contentType: "application/json", status: 415},
+		{name: "mixed multipart", parts: []writingStyleUploadPart{file}, contentType: "multipart/mixed; boundary=test", status: 415},
+		{name: "missing boundary", parts: []writingStyleUploadPart{file}, contentType: "multipart/form-data", status: 400},
+		{name: "wrong boundary", parts: []writingStyleUploadPart{file}, contentType: "multipart/form-data; boundary=wrong", status: 400},
+		{name: "no file", status: 400},
+		{name: "missing filename", parts: []writingStyleUploadPart{{"profile", "", validWritingStyleUpload}}, status: 400},
+		{name: "wrong field name", parts: []writingStyleUploadPart{{"other", "style.md", validWritingStyleUpload}}, status: 400},
+		{name: "two files", parts: []writingStyleUploadPart{file, file}, status: 400},
+		{name: "extra account field", parts: []writingStyleUploadPart{file, {"account_id", "", testID}}, status: 400},
+		{name: "field before file", parts: []writingStyleUploadPart{{"account_id", "", testID}, file}, status: 400},
+		{name: "truncated multipart", parts: []writingStyleUploadPart{file}, truncate: true, status: 400},
+		{name: "truncated second file", parts: []writingStyleUploadPart{file, file}, truncate: true, status: 400},
+		{name: "wrong extension", parts: []writingStyleUploadPart{{"profile", "style.txt", validWritingStyleUpload}}, status: 422},
+		{name: "empty file", parts: []writingStyleUploadPart{{"profile", "style.md", ""}}, status: 422},
+		{name: "invalid UTF-8", parts: []writingStyleUploadPart{{"profile", "style.md", validWritingStyleUpload + "\xff"}}, status: 422},
+		{name: "invalid frontmatter", parts: []writingStyleUploadPart{{"profile", "style.md", "---\nname: [\n---\nUse short sentences."}}, status: 422},
+		{name: "unknown metadata", parts: []writingStyleUploadPart{{"profile", "style.md", strings.Replace(validWritingStyleUpload, "name:", "account_id: other\nname:", 1)}}, status: 422},
+		{name: "oversized Markdown", parts: []writingStyleUploadPart{{"profile", "style.md", validWritingStyleUpload + strings.Repeat("x", 16*1024)}}, status: 422},
+		{name: "oversized file", parts: []writingStyleUploadPart{{"profile", "style.md", strings.Repeat("x", 32*1024+1)}}, status: 413},
+		{name: "oversized request", parts: []writingStyleUploadPart{file}, padding: 64 * 1024, status: 413},
+		{name: "oversized request without length", parts: []writingStyleUploadPart{file}, padding: 64 * 1024, streamed: true, status: 413},
+		{name: "oversized multipart preamble", parts: []writingStyleUploadPart{file}, preamble: true, streamed: true, status: 413},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, contentType := writingStyleUploadBody(t, test.parts...)
+			if test.contentType != "" {
+				contentType = test.contentType
+			}
+			if test.truncate {
+				body = body[:bytes.LastIndex(body, []byte("\r\n--"))]
+			}
+			if test.preamble {
+				body = append([]byte(strings.Repeat("padding\r\n", 9000)), body...)
+			}
+			body = append(body, bytes.Repeat([]byte(" "), test.padding)...)
+			r := writingStyleUploadRequest(body, contentType, cookie, csrf)
+			if test.streamed {
+				r.ContentLength = -1
+			}
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, r)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.status, response.Body.String())
+			}
+			var result map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result["error"] == "" {
+				t.Fatalf("missing JSON error: %s %v", response.Body.String(), err)
+			}
+			if store.writingStyleCalls != 0 {
+				t.Fatal("invalid upload reached storage")
+			}
+		})
+	}
+}
+
+func TestUploadWritingStyleRequiresSessionAndCSRF(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	body, contentType := writingStyleUploadBody(t, writingStyleUploadPart{"profile", "style.md", validWritingStyleUpload})
+	for _, test := range []struct {
+		name   string
+		cookie *http.Cookie
+		csrf   string
+		origin string
+		status int
+	}{
+		{name: "missing session", csrf: csrf, origin: "http://localhost:8080", status: 401},
+		{name: "missing CSRF", cookie: cookie, origin: "http://localhost:8080", status: 403},
+		{name: "wrong CSRF", cookie: cookie, csrf: "incorrect", origin: "http://localhost:8080", status: 403},
+		{name: "wrong origin", cookie: cookie, csrf: csrf, origin: "https://other.example", status: 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := writingStyleUploadRequest(body, contentType, test.cookie, test.csrf)
+			r.Header.Set("Origin", test.origin)
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, r)
+			if response.Code != test.status || store.writingStyleCalls != 0 {
+				t.Fatalf("unauthorized upload: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleCalls)
+			}
+		})
+	}
+}
+
+func TestUploadWritingStyleHandlesStoreErrors(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	body, contentType := writingStyleUploadBody(t, writingStyleUploadPart{"profile", "style.md", validWritingStyleUpload})
+	for _, test := range []struct {
+		err     error
+		status  int
+		message string
+	}{
+		{pgx.ErrNoRows, 404, "Record not found"},
+		{errors.New("private database details"), 503, "Database operation failed. Please try again."},
+		{context.DeadlineExceeded, 503, "Database operation failed. Please try again."},
+	} {
+		store.err = test.err
+		calls := store.writingStyleCalls
+		r := writingStyleUploadRequest(body, contentType, cookie, csrf)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, r)
+		var result map[string]string
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != test.status || len(result) != 1 || result["error"] != test.message || store.writingStyleCalls != calls+1 {
+			t.Fatalf("unexpected error response: %d %s", response.Code, response.Body.String())
+		}
+	}
+}
