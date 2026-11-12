@@ -100,3 +100,18 @@ func (s *Server) handleUploadWritingStyle(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusCreated, saved)
 }
+
+func (s *Server) handleDeleteWritingStyle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !uuidPattern.MatchString(id) {
+		fail(w, http.StatusBadRequest, "A writing profile UUID is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := s.store.DeleteWritingStyle(ctx, id); err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}

@@ -36,6 +36,28 @@ const delivery = {
   last_error: null,
   updated_at: '2026-10-28T09:00:00Z',
 }
+const writingProfile = {
+  profile_id: '55555555-5555-4555-8555-555555555555',
+  name: 'Personal introduction',
+  language: 'en',
+  content: 'Keep the opening brief.\n\n  Preserve this indentation.\n---\n<img src="invalid" onerror="alert(1)">\n' + 'word'.repeat(80),
+  format_version: 1,
+  revision: 3,
+  created_at: '2026-11-12T09:00:00Z',
+  updated_at: '2026-11-12T09:00:00Z',
+}
+const uploadedWritingProfile = {
+  ...writingProfile,
+  profile_id: '66666666-6666-4666-8666-666666666666',
+  name: 'Warm and direct',
+  content: 'Use a friendly greeting and short sentences.\n',
+  revision: 1,
+}
+const writingProfileFile = {
+  name: 'warm.MD',
+  mimeType: 'text/markdown',
+  buffer: Buffer.from(`---\nformat_version: 1\nname: Warm and direct\nlanguage: en\n---\n${uploadedWritingProfile.content}`),
+}
 
 async function mockAPI(page: Page) {
   const state = {
@@ -57,6 +79,16 @@ async function mockAPI(page: Page) {
     presetRequests: [] as { preset_id: string }[],
     presetSaveError: false,
     presetSaveWait: null as Promise<void> | null,
+    writingProfiles: [] as typeof writingProfile[],
+    writingProfilesError: false,
+    writingProfilesWait: null as Promise<void> | null,
+    writingProfileRequests: [] as { limit: number, offset: number }[],
+    writingProfileUploads: [] as { name: string, content: string }[],
+    writingProfileUploadError: null as { status: number, error: string } | null,
+    writingProfileUploadWait: null as Promise<void> | null,
+    writingProfileDeletes: [] as string[],
+    writingProfileDeleteError: false,
+    writingProfileDeleteWait: null as Promise<void> | null,
     setupRequests: [] as Record<string, string>[],
     expired: false,
     drafts: [draft, missingRecipient],
@@ -142,6 +174,38 @@ async function mockAPI(page: Page) {
       if (state.presetSaveError) return reply({ error: 'Database operation failed. Please try again.' }, 503)
       state.defaultPreset = input.preset_id
       return reply({ default_preset_id: state.defaultPreset })
+    }
+    if (path === '/api/settings/writing-styles' && method === 'POST') {
+      const contentType = request.headers()['content-type']
+      expect(contentType).toMatch(/^multipart\/form-data; boundary=/)
+      const data = await new Response(request.postDataBuffer(), { headers: { 'Content-Type': contentType } }).formData()
+      expect([...data.keys()]).toEqual(['profile'])
+      const file = data.get('profile')
+      if (!(file instanceof File)) throw new Error('Expected a profile file')
+      state.writingProfileUploads.push({ name: file.name, content: await file.text() })
+      if (state.writingProfileUploadWait) await state.writingProfileUploadWait
+      if (state.writingProfileUploadError) return reply({ error: state.writingProfileUploadError.error }, state.writingProfileUploadError.status)
+      state.writingProfiles.unshift(uploadedWritingProfile)
+      return reply(uploadedWritingProfile, 201)
+    }
+    if (path.startsWith('/api/settings/writing-styles/') && method === 'DELETE') {
+      const id = decodeURIComponent(path.split('/').at(-1)!)
+      state.writingProfileDeletes.push(id)
+      if (state.writingProfileDeleteWait) await state.writingProfileDeleteWait
+      if (state.writingProfileDeleteError) return reply({ error: 'Database operation failed. Please try again.' }, 503)
+      if (!state.writingProfiles.some((profile) => profile.profile_id === id)) return reply({ error: 'Record not found' }, 404)
+      state.writingProfiles = state.writingProfiles.filter((profile) => profile.profile_id !== id)
+      return reply({ status: 'deleted' })
+    }
+    if (path === '/api/settings/writing-styles' && method === 'GET') {
+      const params = new URL(request.url()).searchParams
+      const limit = Number(params.get('limit'))
+      const offset = Number(params.get('offset'))
+      state.writingProfileRequests.push({ limit, offset })
+      if (state.writingProfilesWait) await state.writingProfilesWait
+      if (state.writingProfilesError) return reply({ error: 'Could not load writing profiles.' }, 503)
+      const items = state.writingProfiles.slice(offset, offset + limit)
+      return reply({ items, has_more: offset + limit < state.writingProfiles.length, offset, next_offset: offset + items.length })
     }
     if (path === '/api/settings/ai') {
       if (state.providerError) return reply({ error: 'Could not load AI providers.' }, 503)
@@ -639,6 +703,301 @@ test('a failed writing style save preserves the selection for retry', async ({ p
   await expect(preset).toHaveValue('technical')
   expect(state.presetRequests).toEqual([{ preset_id: 'technical' }, { preset_id: 'technical' }])
   expect(state.defaultPreset).toBe('technical')
+})
+
+test('custom writing profiles show metadata and a plain text preview on desktop and mobile', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  await expect(profiles.getByRole('heading', { name: writingProfile.name })).toBeVisible()
+  await expect(profiles.getByText('en · Revision 3')).toBeVisible()
+  await expect(profiles.locator('pre')).toBeHidden()
+  const preview = profiles.getByText('Preview writing style', { exact: true })
+  await preview.focus()
+  await page.keyboard.press('Enter')
+  await expect(profiles.locator('pre')).toBeVisible()
+  await expect(profiles.locator('pre')).toHaveText(writingProfile.content, { useInnerText: false })
+  expect(await profiles.locator('pre').textContent()).toBe(writingProfile.content)
+  await expect(profiles.locator('img')).toHaveCount(0)
+  await profiles.screenshot({ path: test.info().outputPath('writing-profiles-desktop.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await profiles.screenshot({ path: test.info().outputPath('writing-profiles-mobile.png') })
+  await preview.click()
+  await expect(profiles.locator('pre')).toBeHidden()
+})
+
+test('custom writing profiles support pagination and refreshing the current page', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = Array.from({ length: 26 }, (_, index) => ({
+    ...writingProfile, profile_id: `profile-${index}`, name: `Writing profile ${index + 1}`,
+  }))
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  await expect(profiles.getByRole('listitem')).toHaveCount(25)
+  await expect(profiles.getByRole('button', { name: 'Previous' })).toBeDisabled()
+  await profiles.getByRole('button', { name: 'Next' }).click()
+  await expect(profiles.getByText('Page 2', { exact: true })).toBeVisible()
+  await expect(profiles.getByRole('listitem')).toHaveCount(1)
+  await expect(profiles.getByRole('heading', { name: 'Writing profile 26', exact: true })).toBeVisible()
+  await expect(profiles.getByRole('button', { name: 'Next' })).toBeDisabled()
+  state.writingProfiles[25] = { ...state.writingProfiles[25], name: 'Updated writing profile', revision: 4 }
+  await profiles.getByRole('button', { name: 'Refresh' }).click()
+  await expect(profiles.getByRole('heading', { name: 'Updated writing profile' })).toBeVisible()
+  await expect(profiles.getByText('en · Revision 4')).toBeVisible()
+  await profiles.getByRole('button', { name: 'Previous' }).click()
+  await expect(profiles.getByText('Page 1', { exact: true })).toBeVisible()
+  await expect(profiles.getByRole('listitem')).toHaveCount(25)
+  expect(state.writingProfileRequests).toEqual([
+    { limit: 25, offset: 0 },
+    { limit: 25, offset: 25 },
+    { limit: 25, offset: 25 },
+    { limit: 25, offset: 0 },
+  ])
+})
+
+test('custom writing profiles distinguish loading and errors from an empty list and allow retry', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfilesError = true
+  let finishLoading!: () => void
+  state.writingProfilesWait = new Promise<void>((resolve) => { finishLoading = resolve })
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  try {
+    await expect(profiles.getByRole('status')).toHaveText('Loading writing profiles…')
+    await expect(profiles.getByText('No custom writing profiles yet.')).toHaveCount(0)
+    for (const name of ['Previous', 'Next', 'Refresh']) {
+      await expect(profiles.getByRole('button', { name, exact: true })).toBeDisabled()
+    }
+  } finally {
+    finishLoading()
+  }
+  await expect(profiles.getByRole('alert')).toContainText('Could not load writing profiles.')
+  await expect(profiles.getByRole('status')).toHaveCount(0)
+  await expect(profiles.getByText('No custom writing profiles yet.')).toHaveCount(0)
+  state.writingProfilesError = false
+  await profiles.getByRole('button', { name: 'Retry' }).click()
+  await expect(profiles.getByText('No custom writing profiles yet.')).toBeVisible()
+  await expect(profiles.getByRole('alert')).toHaveCount(0)
+  await expect(profiles.getByRole('listitem')).toHaveCount(0)
+  await expect(profiles.getByRole('button', { name: 'Next' })).toBeDisabled()
+})
+
+test('uploading a writing profile sends the file and refreshes the first page', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishUpload!: () => void
+  state.writingProfileUploadWait = new Promise<void>((resolve) => { finishUpload = resolve })
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  const form = profiles.getByRole('form', { name: 'Upload writing profile' })
+  const input = form.getByLabel('Markdown profile')
+  await expect(profiles.getByText('No custom writing profiles yet.')).toBeVisible()
+  await expect(form.getByRole('button', { name: 'Upload profile' })).toBeDisabled()
+  await input.setInputFiles(writingProfileFile)
+  await form.getByRole('button', { name: 'Upload profile' }).click()
+  try {
+    await expect(input).toBeDisabled()
+    await expect(form.getByRole('button', { name: 'Uploading…' })).toBeDisabled()
+    await expect(profiles.getByRole('button', { name: 'Refresh' })).toBeDisabled()
+    await expect.poll(() => state.writingProfileUploads).toEqual([
+      { name: writingProfileFile.name, content: writingProfileFile.buffer.toString() },
+    ])
+  } finally {
+    finishUpload()
+  }
+  await expect(form.getByRole('status')).toHaveText('Writing profile uploaded.')
+  await expect(profiles.getByRole('heading', { name: uploadedWritingProfile.name })).toBeVisible()
+  await expect(profiles.getByText('No custom writing profiles yet.')).toHaveCount(0)
+  await expect(input).toBeEnabled()
+  await expect(input).toHaveValue('')
+  await expect(form.getByRole('button', { name: 'Upload profile' })).toBeDisabled()
+  expect(state.writingProfileRequests).toEqual([{ limit: 25, offset: 0 }, { limit: 25, offset: 0 }])
+  await input.setInputFiles(writingProfileFile)
+  await expect(form.getByRole('status')).toHaveCount(0)
+  await expect(form.getByRole('button', { name: 'Upload profile' })).toBeEnabled()
+  await input.setInputFiles([])
+  await expect(form.getByRole('button', { name: 'Upload profile' })).toBeDisabled()
+})
+
+test('uploading a writing profile from another page returns to the newest profiles', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishUpload!: () => void
+  state.writingProfileUploadWait = new Promise<void>((resolve) => { finishUpload = resolve })
+  state.writingProfiles = Array.from({ length: 26 }, (_, index) => ({
+    ...writingProfile, profile_id: `profile-${index}`, name: `Writing profile ${index + 1}`,
+  }))
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  await profiles.getByRole('button', { name: 'Next' }).click()
+  await expect(profiles.getByRole('heading', { name: 'Writing profile 26' })).toBeVisible()
+  await profiles.getByLabel('Markdown profile').setInputFiles(writingProfileFile)
+  await profiles.getByRole('button', { name: 'Upload profile', exact: true }).click()
+  try {
+    await expect(profiles.getByRole('button', { name: 'Uploading…' })).toBeDisabled()
+    await expect(profiles.getByRole('button', { name: 'Delete profile', exact: true })).toBeDisabled()
+    await expect(profiles.getByRole('button', { name: 'Previous' })).toBeDisabled()
+    expect(state.writingProfileDeletes).toHaveLength(0)
+  } finally {
+    finishUpload()
+  }
+  await expect(profiles.getByText('Page 1', { exact: true })).toBeVisible()
+  await expect(profiles.getByRole('listitem').first()).toContainText(uploadedWritingProfile.name)
+  await expect(profiles.getByRole('listitem')).toHaveCount(25)
+  expect(state.writingProfileRequests).toEqual([
+    { limit: 25, offset: 0 }, { limit: 25, offset: 25 }, { limit: 25, offset: 0 },
+  ])
+})
+
+test('writing profile uploads reject invalid files before making a request', async ({ page }) => {
+  const state = await mockAPI(page)
+  await page.goto('/#settings')
+  const form = page.getByRole('form', { name: 'Upload writing profile' })
+  const input = form.getByLabel('Markdown profile')
+  const cases = [
+    { name: 'profile.txt', buffer: writingProfileFile.buffer, error: 'Choose a Markdown (.md) file.' },
+    { name: 'empty.md', buffer: Buffer.alloc(0), error: 'Profile file must not be empty.' },
+    { name: 'large.md', buffer: Buffer.alloc(32 * 1024 + 1, 'a'), error: 'Profile file must not exceed 32 KiB.' },
+  ]
+  for (const file of cases) {
+    await input.setInputFiles({ name: file.name, mimeType: 'text/markdown', buffer: file.buffer })
+    await expect(form.getByRole('alert')).toHaveCount(0)
+    await form.getByRole('button', { name: 'Upload profile' }).click()
+    await expect(form.getByRole('alert')).toHaveText(file.error)
+    await expect(input).toBeEnabled()
+  }
+  expect(state.writingProfileUploads).toHaveLength(0)
+  await input.setInputFiles(writingProfileFile)
+  await expect(form.getByRole('alert')).toHaveCount(0)
+})
+
+for (const failure of [
+  { status: 422, error: 'profile frontmatter must include a name' },
+  { status: 503, error: 'Database operation failed. Please try again.' },
+]) {
+  test(`writing profile upload failure ${failure.status} preserves the selected file for retry`, async ({ page }) => {
+    const state = await mockAPI(page)
+    state.writingProfiles = [writingProfile]
+    state.writingProfileUploadError = failure
+    await page.goto('/#settings')
+    const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+    const form = profiles.getByRole('form', { name: 'Upload writing profile' })
+    const input = form.getByLabel('Markdown profile')
+    await input.setInputFiles(writingProfileFile)
+    await form.getByRole('button', { name: 'Upload profile' }).click()
+    await expect(form.getByRole('alert')).toHaveText(failure.error)
+    await expect(form.getByRole('status')).toHaveCount(0)
+    await expect(input).toHaveValue(/warm\.MD$/)
+    await expect(input).toBeEnabled()
+    await expect(profiles.getByRole('heading', { name: writingProfile.name })).toBeVisible()
+    state.writingProfileUploadError = null
+    await form.getByRole('button', { name: 'Upload profile' }).click()
+    await expect(form.getByRole('status')).toHaveText('Writing profile uploaded.')
+    await expect(form.getByRole('alert')).toHaveCount(0)
+    await expect(input).toHaveValue('')
+    await expect(profiles.getByRole('heading', { name: uploadedWritingProfile.name })).toBeVisible()
+    expect(state.writingProfileUploads).toEqual([
+      { name: writingProfileFile.name, content: writingProfileFile.buffer.toString() },
+      { name: writingProfileFile.name, content: writingProfileFile.buffer.toString() },
+    ])
+  })
+}
+
+test('deleting a writing profile requires confirmation and disables controls until it finishes', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile, uploadedWritingProfile]
+  let finishDelete!: () => void
+  state.writingProfileDeleteWait = new Promise<void>((resolve) => { finishDelete = resolve })
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  const target = profiles.getByRole('listitem').filter({ has: page.getByRole('heading', { name: writingProfile.name }) })
+  const other = profiles.getByRole('listitem').filter({ has: page.getByRole('heading', { name: uploadedWritingProfile.name }) })
+  const input = profiles.getByLabel('Markdown profile')
+  await input.setInputFiles(writingProfileFile)
+  page.once('dialog', async (dialog) => {
+    expect(dialog.type()).toBe('confirm')
+    expect(dialog.message()).toBe(`Delete writing profile "${writingProfile.name}"? This cannot be undone.`)
+    await dialog.dismiss()
+  })
+  await target.getByRole('button', { name: 'Delete profile' }).click()
+  await expect(target).toBeVisible()
+  expect(state.writingProfileDeletes).toHaveLength(0)
+  page.once('dialog', (dialog) => dialog.accept())
+  await target.getByRole('button', { name: 'Delete profile' }).click()
+  try {
+    await expect(target.getByRole('button', { name: 'Deleting…' })).toBeDisabled()
+    await expect(other.getByRole('button', { name: 'Delete profile' })).toBeDisabled()
+    await expect(input).toBeDisabled()
+    await expect(profiles.getByRole('button', { name: 'Upload profile', exact: true })).toBeDisabled()
+    await expect(profiles.getByRole('button', { name: 'Refresh' })).toBeDisabled()
+    await expect.poll(() => state.writingProfileDeletes).toEqual([writingProfile.profile_id])
+  } finally {
+    finishDelete()
+  }
+  await expect(profiles.getByRole('status').filter({ hasText: 'Writing profile deleted.' })).toBeVisible()
+  await expect(target).toHaveCount(0)
+  await expect(other).toBeVisible()
+  await expect(input).toBeEnabled()
+  await expect(input).toHaveValue(/warm\.MD$/)
+  await expect(profiles.getByRole('button', { name: 'Upload profile', exact: true })).toBeEnabled()
+  await expect(other.getByRole('button', { name: 'Delete profile' })).toBeEnabled()
+  expect(state.writingProfileRequests).toEqual([{ limit: 25, offset: 0 }, { limit: 25, offset: 0 }])
+  expect(state.writingProfileUploads).toHaveLength(0)
+  await page.reload()
+  await expect(profiles.getByRole('listitem')).toHaveCount(1)
+  await expect(other).toBeVisible()
+  await expect(target).toHaveCount(0)
+})
+
+test('deleting the last writing profile on a later page returns to the previous page', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = Array.from({ length: 26 }, (_, index) => ({
+    ...writingProfile, profile_id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`, name: `Writing profile ${index + 1}`,
+  }))
+  const lastID = state.writingProfiles[25].profile_id
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  await profiles.getByRole('button', { name: 'Next' }).click()
+  await expect(profiles.getByRole('heading', { name: 'Writing profile 26', exact: true })).toBeVisible()
+  page.once('dialog', (dialog) => dialog.accept())
+  await profiles.getByRole('button', { name: 'Delete profile' }).click()
+  await expect(profiles.getByRole('status').filter({ hasText: 'Writing profile deleted.' })).toBeVisible()
+  await expect(profiles.getByText('Page 1', { exact: true })).toBeVisible()
+  await expect(profiles.getByRole('listitem')).toHaveCount(25)
+  await expect(profiles.getByRole('heading', { name: 'Writing profile 26', exact: true })).toHaveCount(0)
+  await expect(profiles.getByRole('button', { name: 'Next' })).toBeDisabled()
+  await expect(profiles.getByRole('button', { name: 'Previous' })).toBeDisabled()
+  expect(state.writingProfileDeletes).toEqual([lastID])
+  expect(state.writingProfileRequests).toEqual([
+    { limit: 25, offset: 0 }, { limit: 25, offset: 25 }, { limit: 25, offset: 0 },
+  ])
+})
+
+test('failed writing profile deletion preserves the list and can be retried', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  state.writingProfileDeleteError = true
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  page.on('dialog', (dialog) => dialog.accept())
+  await profiles.getByRole('button', { name: 'Delete profile' }).click()
+  await expect(profiles.getByRole('alert')).toHaveText('Database operation failed. Please try again.')
+  await expect(profiles.getByRole('heading', { name: writingProfile.name })).toBeVisible()
+  await expect(profiles.getByRole('status')).toHaveCount(0)
+  await expect(profiles.getByRole('form', { name: 'Upload writing profile' }).getByRole('alert')).toHaveCount(0)
+  await expect(profiles.getByRole('button', { name: 'Delete profile' })).toBeEnabled()
+  state.writingProfileDeleteError = false
+  await profiles.getByRole('button', { name: 'Delete profile' }).click()
+  await expect(profiles.getByRole('status').filter({ hasText: 'Writing profile deleted.' })).toBeVisible()
+  await expect(profiles.getByRole('alert')).toHaveCount(0)
+  await expect(profiles.getByText('No custom writing profiles yet.')).toBeVisible()
+  await expect(profiles.getByRole('listitem')).toHaveCount(0)
+  expect(state.writingProfileDeletes).toEqual([writingProfile.profile_id, writingProfile.profile_id])
+  await profiles.getByLabel('Markdown profile').setInputFiles(writingProfileFile)
+  await profiles.getByRole('button', { name: 'Upload profile', exact: true }).click()
+  await expect(profiles.getByText('Writing profile deleted.', { exact: true })).toHaveCount(0)
+  await expect(profiles.getByRole('form', { name: 'Upload writing profile' }).getByRole('status')).toHaveText('Writing profile uploaded.')
+  await expect(profiles.getByRole('heading', { name: uploadedWritingProfile.name })).toBeVisible()
 })
 
 test('the operator can save, replace, and remove shared AI configuration', async ({ page }) => {

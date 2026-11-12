@@ -19,25 +19,29 @@ const testID = "11111111-1111-4111-8111-111111111111"
 const testPassword = "letter1!"
 
 type fakeStore struct {
-	draft                  catalogue.Draft
-	err                    error
-	activity               *Activity
-	saved                  ContactInput
-	draftInput             catalogue.CreateDraftInput
-	editInput              catalogue.EditDraftInput
-	editID                 string
-	editVersion            int
-	limit                  int
-	offset                 int
-	writingStyle           WritingStyleProfile
-	writingStyleInput      writingstyle.Profile
-	writingStyleAccountID  string
-	writingStyleCalls      int
-	writingStyleDeadline   time.Time
-	writingStyles          []WritingStyleProfile
-	writingStylesCalls     int
-	writingStylesAccountID string
-	writingStylesDeadline  time.Time
+	draft                       catalogue.Draft
+	err                         error
+	activity                    *Activity
+	saved                       ContactInput
+	draftInput                  catalogue.CreateDraftInput
+	editInput                   catalogue.EditDraftInput
+	editID                      string
+	editVersion                 int
+	limit                       int
+	offset                      int
+	writingStyle                WritingStyleProfile
+	writingStyleInput           writingstyle.Profile
+	writingStyleAccountID       string
+	writingStyleCalls           int
+	writingStyleDeadline        time.Time
+	writingStyles               []WritingStyleProfile
+	writingStylesCalls          int
+	writingStylesAccountID      string
+	writingStylesDeadline       time.Time
+	writingStyleDeleteID        string
+	writingStyleDeleteAccountID string
+	writingStyleDeleteCalls     int
+	writingStyleDeleteDeadline  time.Time
 }
 
 func (f *fakeStore) Drafts(_ context.Context, limit, offset int) ([]catalogue.Draft, error) {
@@ -83,6 +87,14 @@ func (f *fakeStore) WritingStyles(ctx context.Context, limit, offset int) ([]Wri
 	f.writingStylesAccountID = contextAccount(ctx).ID
 	f.writingStylesDeadline, _ = ctx.Deadline()
 	return f.writingStyles, f.err
+}
+
+func (f *fakeStore) DeleteWritingStyle(ctx context.Context, id string) error {
+	f.writingStyleDeleteID = id
+	f.writingStyleDeleteAccountID = contextAccount(ctx).ID
+	f.writingStyleDeleteCalls++
+	f.writingStyleDeleteDeadline, _ = ctx.Deadline()
+	return f.err
 }
 
 type fakeBridge struct {

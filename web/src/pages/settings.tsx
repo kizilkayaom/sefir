@@ -4,6 +4,7 @@ import type { FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { AuthNotice } from '@/components/auth-notice'
 import { AISettingsPanel } from '@/components/ai-settings'
+import { CustomWritingStyles } from '@/components/custom-writing-styles'
 import { GoogleSignIn } from '@/components/google-sign-in'
 import { WritingStyleSettings } from '@/components/writing-style-settings'
 import { useResource } from '@/hooks/use-resource'
@@ -90,6 +91,7 @@ export function SettingsPage({ onDeleted }: { onDeleted: () => void }) {
         <h2 className="text-xl font-semibold">Writing style</h2>
         {styleMessage && <p role="status" className="text-sm">{styleMessage}</p>}
         {account.data && <WritingStyleSettings key={account.data.default_preset_id} current={account.data.default_preset_id} onSaved={styleSaved} />}
+        <CustomWritingStyles />
       </section>
       <section className="mt-6 space-y-4 rounded-xl border bg-card p-6">
         <h2 className="text-xl font-semibold">Your workspace and data</h2>

@@ -84,3 +84,22 @@ func (s PostgresStore) WritingStyles(
 	defer rows.Close()
 	return pgx.CollectRows(rows, pgx.RowToStructByName[WritingStyleProfile])
 }
+
+func (s PostgresStore) DeleteWritingStyle(ctx context.Context, profileID string) error {
+	accountID, err := contextAccountID(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := s.Pool.Exec(ctx, `
+		DELETE FROM writing_style_profiles AS p
+		USING accounts AS a
+		WHERE p.account_id=$1 AND p.profile_id=$2 AND a.account_id=p.account_id
+			AND NOT a.legacy_reserved AND a.deletion_requested_at IS NULL`, accountID, profileID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}

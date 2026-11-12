@@ -279,3 +279,94 @@ func TestPostgresWritingStyles(t *testing.T) {
 		t.Fatalf("other account's profiles changed: %+v %v", profiles, err)
 	}
 }
+
+func TestDeleteWritingStyleRequiresAccount(t *testing.T) {
+	store := PostgresStore{}
+	for _, ctx := range []context.Context{
+		context.Background(),
+		withAccount(context.Background(), Account{ID: "not-a-uuid"}),
+	} {
+		err := store.DeleteWritingStyle(ctx, testID)
+		if err == nil || err.Error() != "authenticated account is required" {
+			t.Fatalf("account validation error = %v", err)
+		}
+	}
+}
+
+func TestPostgresDeleteWritingStyle(t *testing.T) {
+	pool := accountTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, "CREATE TEMP TABLE writing_style_profiles (LIKE public.writing_style_profiles INCLUDING ALL)"); err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]string)
+	for _, name := range []string{"owner", "other", "reserved", "deleting"} {
+		var id string
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO accounts (username, legacy_reserved, deletion_requested_at)
+			VALUES ($1, $2, CASE WHEN $3::boolean THEN now() ELSE NULL END)
+			RETURNING account_id::text`, name, name == "reserved", name == "deleting").Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = id
+	}
+	profiles := make(map[string]string)
+	remaining := make(map[string]struct{ accountID, name string })
+	for _, seed := range []struct{ name, account string }{
+		{"target", "owner"},
+		{"kept", "owner"},
+		{"other", "other"},
+		{"reserved", "reserved"},
+		{"deleting", "deleting"},
+	} {
+		var id string
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO writing_style_profiles (account_id, name, content)
+			VALUES ($1, $2, 'Keep it clear.')
+			RETURNING profile_id::text`, ids[seed.account], seed.name).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		profiles[seed.name] = id
+		remaining[id] = struct{ accountID, name string }{ids[seed.account], seed.name}
+	}
+	store := PostgresStore{Pool: pool}
+	for _, test := range []struct {
+		name      string
+		account   string
+		profileID string
+		wantErr   error
+	}{
+		{"own profile", "owner", profiles["target"], nil},
+		{"already deleted", "owner", profiles["target"], pgx.ErrNoRows},
+		{"other account's profile", "owner", profiles["other"], pgx.ErrNoRows},
+		{"missing profile", "owner", testID, pgx.ErrNoRows},
+		{"reserved account", "reserved", profiles["reserved"], pgx.ErrNoRows},
+		{"deleting account", "deleting", profiles["deleting"], pgx.ErrNoRows},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := store.DeleteWritingStyle(withAccount(ctx, Account{ID: ids[test.account]}), test.profileID)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("delete error = %v, want %v", err, test.wantErr)
+			}
+			if test.wantErr == nil {
+				delete(remaining, test.profileID)
+			}
+			var count int
+			if err := pool.QueryRow(ctx, "SELECT count(*) FROM writing_style_profiles").Scan(&count); err != nil || count != len(remaining) {
+				t.Fatalf("remaining profiles = %d, want %d: %v", count, len(remaining), err)
+			}
+			for id, want := range remaining {
+				var accountID, name, content string
+				if err := pool.QueryRow(ctx, `
+					SELECT account_id::text, name, content
+					FROM writing_style_profiles WHERE profile_id=$1`, id).Scan(&accountID, &name, &content); err != nil {
+					t.Fatalf("read remaining profile %s: %v", id, err)
+				}
+				if accountID != want.accountID || name != want.name || content != "Keep it clear." {
+					t.Fatalf("remaining profile %s changed: account=%s name=%q content=%q", id, accountID, name, content)
+				}
+			}
+		})
+	}
+}

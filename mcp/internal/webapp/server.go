@@ -127,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/google/callback", s.protect(s.handleGmailCallback))
 	mux.HandleFunc("GET /api/settings/writing-styles", s.protect(s.handleWritingStyles))
 	mux.HandleFunc("POST /api/settings/writing-styles", s.protect(s.handleUploadWritingStyle))
+	mux.HandleFunc("DELETE /api/settings/writing-styles/{id}", s.protect(s.handleDeleteWritingStyle))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "Endpoint not found")
 	})
@@ -135,6 +136,10 @@ func (s *Server) Handler() http.Handler {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			fail(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
+		}
+		if r.URL.Path == "/writing-profile-example.md" {
+			w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+			w.Header().Set("Content-Disposition", `attachment; filename="writing-profile-example.md"`)
 		}
 		files.ServeHTTP(w, r)
 	})

@@ -377,3 +377,112 @@ func TestUploadWritingStyleHandlesStoreErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleDeleteWritingStyle(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	accountID := server.sessions[cookie.Value].AccountID
+	before := time.Now()
+	response := request(server, "DELETE", "/api/settings/writing-styles/"+testID, "", cookie, csrf)
+	var result map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || len(result) != 1 || result["status"] != "deleted" {
+		t.Fatalf("delete writing style: %d %s", response.Code, response.Body.String())
+	}
+	if store.writingStyleDeleteCalls != 1 || store.writingStyleDeleteID != testID || store.writingStyleDeleteAccountID != accountID {
+		t.Fatalf("wrong storage request: account=%s profile=%s calls=%d", store.writingStyleDeleteAccountID, store.writingStyleDeleteID, store.writingStyleDeleteCalls)
+	}
+	if store.writingStyleDeleteDeadline.Before(before.Add(5*time.Second)) || store.writingStyleDeleteDeadline.After(time.Now().Add(5*time.Second)) {
+		t.Fatal("storage did not receive a five-second deadline")
+	}
+}
+
+func TestHandleDeleteWritingStyleRejectsInvalidID(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	for _, id := range []string{"not-a-uuid", testID + "-extra", "gggggggg-1111-4111-8111-111111111111"} {
+		t.Run(id, func(t *testing.T) {
+			response := request(server, "DELETE", "/api/settings/writing-styles/"+id, "", cookie, csrf)
+			var result map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != http.StatusBadRequest || len(result) != 1 || result["error"] != "A writing profile UUID is required" || store.writingStyleDeleteCalls != 0 {
+				t.Fatalf("invalid ID reached storage or returned the wrong error: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleDeleteCalls)
+			}
+		})
+	}
+}
+
+func TestHandleDeleteWritingStyleRequiresSessionAndCSRF(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	for _, test := range []struct {
+		name   string
+		cookie *http.Cookie
+		csrf   string
+		origin string
+		status int
+	}{
+		{name: "missing session", csrf: csrf, origin: "http://localhost:8080", status: 401},
+		{name: "unknown session", cookie: &http.Cookie{Name: cookie.Name, Value: "unknown"}, csrf: csrf, origin: "http://localhost:8080", status: 401},
+		{name: "missing CSRF", cookie: cookie, origin: "http://localhost:8080", status: 403},
+		{name: "wrong CSRF", cookie: cookie, csrf: "incorrect", origin: "http://localhost:8080", status: 403},
+		{name: "missing origin", cookie: cookie, csrf: csrf, status: 403},
+		{name: "wrong origin", cookie: cookie, csrf: csrf, origin: "https://other.example", status: 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodDelete, "http://localhost:8080/api/settings/writing-styles/"+testID, nil)
+			r.Header.Set("Origin", test.origin)
+			r.Header.Set("X-CSRF-Token", test.csrf)
+			if test.cookie != nil {
+				r.AddCookie(test.cookie)
+			}
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, r)
+			if response.Code != test.status || store.writingStyleDeleteCalls != 0 {
+				t.Fatalf("unauthorized deletion: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleDeleteCalls)
+			}
+		})
+	}
+	t.Run("deleting account", func(t *testing.T) {
+		accountID := server.sessions[cookie.Value].AccountID
+		if err := server.accounts.RequestDeletion(context.Background(), accountID); err != nil {
+			t.Fatal(err)
+		}
+		response := request(server, "DELETE", "/api/settings/writing-styles/"+testID, "", cookie, csrf)
+		if response.Code != http.StatusNotFound || store.writingStyleDeleteCalls != 0 {
+			t.Fatalf("deleting account reached profile storage: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleDeleteCalls)
+		}
+	})
+}
+
+func TestHandleDeleteWritingStyleHandlesStoreErrors(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	for _, test := range []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{"not found", pgx.ErrNoRows, 404, "Record not found"},
+		{"database error", errors.New("private database details"), 503, "Database operation failed. Please try again."},
+		{"deadline exceeded", context.DeadlineExceeded, 503, "Database operation failed. Please try again."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store.err = test.err
+			calls := store.writingStyleDeleteCalls
+			response := request(server, "DELETE", "/api/settings/writing-styles/"+testID, "", cookie, csrf)
+			var result map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != test.status || len(result) != 1 || result["error"] != test.message || store.writingStyleDeleteCalls != calls+1 {
+				t.Fatalf("unexpected error response: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleDeleteCalls)
+			}
+		})
+	}
+}
