@@ -366,6 +366,121 @@ func TestPostgresWritingStyle(t *testing.T) {
 	}
 }
 
+func TestUpdateWritingStyleRequiresAccount(t *testing.T) {
+	store := PostgresStore{}
+	for _, ctx := range []context.Context{
+		context.Background(),
+		withAccount(context.Background(), Account{ID: "not-a-uuid"}),
+	} {
+		saved, err := store.UpdateWritingStyle(ctx, testID, 1, writingstyle.Profile{})
+		if err == nil || err.Error() != "authenticated account is required" {
+			t.Fatalf("account validation error = %v", err)
+		}
+		if saved != (WritingStyleProfile{}) {
+			t.Fatalf("unauthenticated request returned a profile: %+v", saved)
+		}
+	}
+}
+
+func TestUpdateWritingStyleRejectsInvalidRevision(t *testing.T) {
+	store := PostgresStore{}
+	ctx := withAccount(context.Background(), Account{ID: testID})
+	profile := writingstyle.Profile{
+		FormatVersion: 1, Name: "Warm and direct", Language: "en", Content: "Use short sentences.",
+	}
+	for _, revision := range []int{-1, 0, 2147483647} {
+		saved, err := store.UpdateWritingStyle(ctx, testID, revision, profile)
+		if err == nil || err.Error() != "expected revision must be between 1 and 2147483646" {
+			t.Fatalf("revision %d validation error = %v", revision, err)
+		}
+		if saved != (WritingStyleProfile{}) {
+			t.Fatalf("invalid revision %d returned a profile: %+v", revision, saved)
+		}
+	}
+}
+
+func TestPostgresUpdateWritingStyle(t *testing.T) {
+	pool := accountTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, "CREATE TEMP TABLE writing_style_profiles (LIKE public.writing_style_profiles INCLUDING ALL)"); err != nil {
+		t.Fatal(err)
+	}
+	var accountID string
+	if err := pool.QueryRow(ctx, "INSERT INTO accounts (username) VALUES ('owner') RETURNING account_id::text").Scan(&accountID); err != nil {
+		t.Fatal(err)
+	}
+	original := WritingStyleProfile{
+		Name: "Original style", Language: "en", Content: "Keep the opening brief.",
+		FormatVersion: 1, Revision: 3, CreatedAt: time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC),
+	}
+	original.UpdatedAt = original.CreatedAt.Add(time.Minute)
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO writing_style_profiles (account_id, name, language, content,
+			format_version, revision, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING profile_id::text`, accountID, original.Name, original.Language, original.Content,
+		original.FormatVersion, original.Revision, original.CreatedAt, original.UpdatedAt).Scan(&original.ProfileID); err != nil {
+		t.Fatal(err)
+	}
+	store := PostgresStore{Pool: pool}
+	accountCtx := withAccount(ctx, Account{ID: accountID})
+	profile := writingstyle.Profile{
+		FormatVersion: 1, Name: "Sıcak ve doğrudan", Language: "tr",
+		Content: "\n## Style\nKısa cümleler kullan.\n\n    Preserve indentation.\n",
+	}
+	saved, err := store.UpdateWritingStyle(accountCtx, original.ProfileID, original.Revision, profile)
+	if err != nil {
+		t.Fatalf("update writing style: %v", err)
+	}
+	if saved.ProfileID != original.ProfileID || saved.Name != profile.Name ||
+		saved.Language != profile.Language || saved.Content != profile.Content ||
+		saved.FormatVersion != profile.FormatVersion || saved.Revision != 4 {
+		t.Fatalf("updated profile = %+v", saved)
+	}
+	if !saved.CreatedAt.Equal(original.CreatedAt) || !saved.UpdatedAt.After(original.UpdatedAt) {
+		t.Fatalf("unexpected timestamps: created=%v updated=%v", saved.CreatedAt, saved.UpdatedAt)
+	}
+	saved.CreatedAt = saved.CreatedAt.UTC()
+	saved.UpdatedAt = saved.UpdatedAt.UTC()
+	stored, err := store.WritingStyle(accountCtx, original.ProfileID)
+	if err != nil {
+		t.Fatalf("read updated profile: %v", err)
+	}
+	stored.CreatedAt = stored.CreatedAt.UTC()
+	stored.UpdatedAt = stored.UpdatedAt.UTC()
+	if stored != saved {
+		t.Fatalf("stored profile = %+v, want %+v", stored, saved)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM writing_style_profiles").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("profile count = %d, want 1", count)
+	}
+
+	stale := writingstyle.Profile{
+		FormatVersion: 1, Name: "Stale edit", Language: "en", Content: "This must not replace the saved content.",
+	}
+	rejected, err := store.UpdateWritingStyle(accountCtx, original.ProfileID, original.Revision, stale)
+	if !errors.Is(err, ErrWritingStyleConflict) {
+		t.Fatalf("stale update error = %v, want ErrWritingStyleConflict", err)
+	}
+	if rejected != (WritingStyleProfile{}) {
+		t.Fatalf("stale update returned a profile: %+v", rejected)
+	}
+	stored, err = store.WritingStyle(accountCtx, original.ProfileID)
+	if err != nil {
+		t.Fatalf("read profile after stale update: %v", err)
+	}
+	stored.CreatedAt = stored.CreatedAt.UTC()
+	stored.UpdatedAt = stored.UpdatedAt.UTC()
+	if stored != saved {
+		t.Fatalf("stale update changed the profile: %+v, want %+v", stored, saved)
+	}
+}
+
 func TestDeleteWritingStyleRequiresAccount(t *testing.T) {
 	store := PostgresStore{}
 	for _, ctx := range []context.Context{
