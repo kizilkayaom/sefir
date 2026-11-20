@@ -42,6 +42,10 @@ type fakeStore struct {
 	writingStyleDeleteAccountID string
 	writingStyleDeleteCalls     int
 	writingStyleDeleteDeadline  time.Time
+	writingStyleLookupID        string
+	writingStyleLookupAccountID string
+	writingStyleLookupCalls     int
+	writingStyleLookupDeadline  time.Time
 }
 
 func (f *fakeStore) Drafts(_ context.Context, limit, offset int) ([]catalogue.Draft, error) {
@@ -87,6 +91,14 @@ func (f *fakeStore) WritingStyles(ctx context.Context, limit, offset int) ([]Wri
 	f.writingStylesAccountID = contextAccount(ctx).ID
 	f.writingStylesDeadline, _ = ctx.Deadline()
 	return f.writingStyles, f.err
+}
+
+func (f *fakeStore) WritingStyle(ctx context.Context, id string) (WritingStyleProfile, error) {
+	f.writingStyleLookupID = id
+	f.writingStyleLookupAccountID = contextAccount(ctx).ID
+	f.writingStyleLookupCalls++
+	f.writingStyleLookupDeadline, _ = ctx.Deadline()
+	return f.writingStyle, f.err
 }
 
 func (f *fakeStore) DeleteWritingStyle(ctx context.Context, id string) error {

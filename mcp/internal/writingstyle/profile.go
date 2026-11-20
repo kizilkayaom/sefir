@@ -115,3 +115,28 @@ func ParseProfile(filename string, data []byte) (Profile, error) {
 	}
 	return profile, nil
 }
+
+func ExportProfile(profile Profile) ([]byte, error) {
+	metadata := struct {
+		FormatVersion int    `yaml:"format_version"`
+		Name          string `yaml:"name"`
+		Language      string `yaml:"language"`
+	}{
+		FormatVersion: profile.FormatVersion,
+		Name:          profile.Name,
+		Language:      profile.Language,
+	}
+
+	header, err := yaml.Dump(metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	output := []byte("---\n" + string(header) + "---\n" + profile.Content)
+
+	if _, err = ParseProfile("profile.md", output); err != nil {
+		return nil, err
+	}
+
+	return output, nil
+}

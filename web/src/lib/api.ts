@@ -31,6 +31,19 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return body as T
 }
 
+export async function apiDownload(path: string): Promise<Blob> {
+  const response = await fetch(path, { credentials: 'same-origin' })
+  if (response.status === 401) {
+    setCSRFToken('')
+    window.dispatchEvent(new Event('sefir-session-expired'))
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.error || 'The request failed. Please try again.')
+  }
+  return response.blob()
+}
+
 export function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 }

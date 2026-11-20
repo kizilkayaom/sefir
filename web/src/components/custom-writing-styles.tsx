@@ -4,7 +4,7 @@ import type { FormEvent } from 'react'
 import { PageControls } from '@/components/page-controls'
 import { Button } from '@/components/ui/button'
 import { useResource } from '@/hooks/use-resource'
-import { api, errorMessage } from '@/lib/api'
+import { api, apiDownload, errorMessage } from '@/lib/api'
 import type { Page, WritingStyleProfile } from '@/types/api'
 
 export function CustomWritingStyles() {
@@ -16,7 +16,9 @@ export function CustomWritingStyles() {
   const [deletingID, setDeletingID] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState('')
   const [deleteMessage, setDeleteMessage] = useState('')
-  const busy = uploading || deletingID !== null
+  const [exportingID, setExportingID] = useState<string | null>(null)
+  const [exportError, setExportError] = useState('')
+  const busy = uploading || deletingID !== null || exportingID !== null
   const profiles = useResource<Page<WritingStyleProfile>>(
     `/api/settings/writing-styles?limit=25&offset=${offset}`,
   )
@@ -29,6 +31,7 @@ export function CustomWritingStyles() {
     setUploadMessage('')
     setDeleteError('')
     setDeleteMessage('')
+    setExportError('')
     if (!file.name.toLowerCase().endsWith('.md')) {
       setUploadError('Choose a Markdown (.md) file.')
       return
@@ -64,6 +67,7 @@ export function CustomWritingStyles() {
     setDeleteMessage('')
     setUploadError('')
     setUploadMessage('')
+    setExportError('')
     setDeletingID(profile.profile_id)
     try {
       await api(`/api/settings/writing-styles/${profile.profile_id}`, { method: 'DELETE' })
@@ -74,6 +78,34 @@ export function CustomWritingStyles() {
       setDeleteError(errorMessage(error))
     } finally {
       setDeletingID(null)
+    }
+  }
+
+  async function exportProfile(profile: WritingStyleProfile) {
+    if (busy) return
+    setExportError('')
+    setUploadError('')
+    setUploadMessage('')
+    setDeleteError('')
+    setDeleteMessage('')
+    setExportingID(profile.profile_id)
+    try {
+      const blob = await apiDownload(`/api/settings/writing-styles/${encodeURIComponent(profile.profile_id)}/export`)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      try {
+        link.href = url
+        link.download = `writing-profile-${profile.profile_id}.md`
+        document.body.append(link)
+        link.click()
+      } finally {
+        link.remove()
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      }
+    } catch (error) {
+      setExportError(errorMessage(error))
+    } finally {
+      setExportingID(null)
     }
   }
 
@@ -109,6 +141,7 @@ export function CustomWritingStyles() {
       </form>
       {deleteError && <p role="alert" className="text-sm text-destructive">{deleteError}</p>}
       {deleteMessage && <p role="status" className="text-sm">{deleteMessage}</p>}
+      {exportError && <p role="alert" className="text-sm text-destructive">{exportError}</p>}
       <PageControls
         offset={offset}
         hasMore={profiles.data?.has_more ?? false}
@@ -138,9 +171,14 @@ export function CustomWritingStyles() {
                 </summary>
                 <pre className="mt-3 whitespace-pre-wrap rounded-md bg-muted p-3 text-sm">{profile.content}</pre>
               </details>
-              <Button type="button" variant="destructive" disabled={busy} onClick={() => remove(profile)}>
-                {deletingID === profile.profile_id ? 'Deleting…' : 'Delete profile'}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="outline" disabled={busy} onClick={() => exportProfile(profile)}>
+                  {exportingID === profile.profile_id ? 'Exporting…' : 'Export profile'}
+                </Button>
+                <Button type="button" variant="destructive" disabled={busy} onClick={() => remove(profile)}>
+                  {deletingID === profile.profile_id ? 'Deleting…' : 'Delete profile'}
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

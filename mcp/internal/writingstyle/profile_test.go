@@ -132,3 +132,82 @@ func TestParseProfileRejectsInvalidUploads(t *testing.T) {
 		})
 	}
 }
+
+func TestExportProfileRoundTrip(t *testing.T) {
+	body := "\n## Style\nUse everyday vocabulary.  \n\n---\n\n    Keep example indentation.\n\n"
+	for _, test := range []struct {
+		name    string
+		profile Profile
+	}{
+		{
+			name:    "normal profile",
+			profile: Profile{FormatVersion: 1, Name: "Warm and direct", Language: "en", Content: "Use short sentences."},
+		},
+		{
+			name:    "special characters in name",
+			profile: Profile{FormatVersion: 1, Name: "Warm: \"direct\" # personal \\ concise", Language: "en", Content: "Use short sentences."},
+		},
+		{
+			name:    "Unicode text",
+			profile: Profile{FormatVersion: 1, Name: "Sıcak ve doğrudan", Language: "tr", Content: "## Stil\nKısa cümleler kullan.\n"},
+		},
+		{
+			name:    "YAML-like name",
+			profile: Profile{FormatVersion: 1, Name: "true", Language: "en", Content: "Use short sentences."},
+		},
+		{
+			name:    "Markdown whitespace preserved",
+			profile: Profile{FormatVersion: 1, Name: "Warm", Language: "en", Content: body},
+		},
+		{
+			name:    "16 KiB body",
+			profile: Profile{FormatVersion: 1, Name: "Warm", Language: "en", Content: strings.Repeat("é", 8*1024)},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output, err := ExportProfile(test.profile)
+			if err != nil {
+				t.Fatalf("export profile: %v", err)
+			}
+			got, err := ParseProfile("profile.md", output)
+			if err != nil {
+				t.Fatalf("parse exported profile: %v", err)
+			}
+			if got != test.profile {
+				t.Fatal("exported profile changed during re-import")
+			}
+		})
+	}
+}
+
+func TestExportProfileRejectsInvalidProfiles(t *testing.T) {
+	valid := Profile{FormatVersion: 1, Name: "Warm", Language: "en", Content: "Use short sentences."}
+	for _, test := range []struct {
+		name   string
+		change func(*Profile)
+		want   string
+	}{
+		{name: "unsupported version", change: func(p *Profile) { p.FormatVersion = 2 }, want: "format_version"},
+		{name: "blank name", change: func(p *Profile) { p.Name = " \t " }, want: "1 and 80"},
+		{name: "long name", change: func(p *Profile) { p.Name = strings.Repeat("é", 81) }, want: "1 and 80"},
+		{name: "blank language", change: func(p *Profile) { p.Language = " \t " }, want: "1 and 35"},
+		{name: "long language", change: func(p *Profile) { p.Language = strings.Repeat("a", 36) }, want: "1 and 35"},
+		{name: "empty body", change: func(p *Profile) { p.Content = "" }, want: "style guidance"},
+		{name: "blank body", change: func(p *Profile) { p.Content = " \t\n" }, want: "style guidance"},
+		{name: "oversize body", change: func(p *Profile) { p.Content = strings.Repeat("x", 16*1024+1) }, want: "16 KiB"},
+		{name: "invalid UTF-8", change: func(p *Profile) { p.Content += "\xff" }, want: "UTF-8"},
+		{name: "NUL in body", change: func(p *Profile) { p.Content += "\x00" }, want: "NUL"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile := valid
+			test.change(&profile)
+			output, err := ExportProfile(profile)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want an error containing %q", err, test.want)
+			}
+			if output != nil {
+				t.Fatal("invalid profile returned a partial export")
+			}
+		})
+	}
+}

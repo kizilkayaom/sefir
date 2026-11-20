@@ -280,6 +280,92 @@ func TestPostgresWritingStyles(t *testing.T) {
 	}
 }
 
+func TestWritingStyleRequiresAccount(t *testing.T) {
+	store := PostgresStore{}
+	for _, ctx := range []context.Context{
+		context.Background(),
+		withAccount(context.Background(), Account{ID: "not-a-uuid"}),
+	} {
+		profile, err := store.WritingStyle(ctx, testID)
+		if err == nil || err.Error() != "authenticated account is required" {
+			t.Fatalf("account validation error = %v", err)
+		}
+		if profile != (WritingStyleProfile{}) {
+			t.Fatalf("unauthenticated request returned a profile: %+v", profile)
+		}
+	}
+}
+
+func TestPostgresWritingStyle(t *testing.T) {
+	pool := accountTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, "CREATE TEMP TABLE writing_style_profiles (LIKE public.writing_style_profiles INCLUDING ALL)"); err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]string)
+	want := make(map[string]WritingStyleProfile)
+	created := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
+	for i, name := range []string{"owner", "other", "reserved", "deleting"} {
+		var id string
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO accounts (username, legacy_reserved, deletion_requested_at)
+			VALUES ($1, $2, CASE WHEN $3::boolean THEN now() ELSE NULL END)
+			RETURNING account_id::text`, name, name == "reserved", name == "deleting").Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = id
+		profile := WritingStyleProfile{
+			Name: name, Language: "tr", Content: "\n## Style\nDoğrudan yaz: " + name + "\n",
+			FormatVersion: 1, Revision: i + 2, CreatedAt: created.Add(time.Duration(i) * time.Hour),
+		}
+		profile.UpdatedAt = profile.CreatedAt.Add(time.Minute)
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO writing_style_profiles (account_id, name, language, content,
+				format_version, revision, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING profile_id::text`, id, profile.Name, profile.Language, profile.Content,
+			profile.FormatVersion, profile.Revision, profile.CreatedAt, profile.UpdatedAt).Scan(&profile.ProfileID); err != nil {
+			t.Fatal(err)
+		}
+		want[name] = profile
+	}
+	store := PostgresStore{Pool: pool}
+	for _, test := range []struct {
+		name      string
+		account   string
+		profileID string
+		want      WritingStyleProfile
+		wantErr   error
+	}{
+		{"owner profile", "owner", want["owner"].ProfileID, want["owner"], nil},
+		{"other account's own profile", "other", want["other"].ProfileID, want["other"], nil},
+		{"owner cannot read other profile", "owner", want["other"].ProfileID, WritingStyleProfile{}, pgx.ErrNoRows},
+		{"other cannot read owner profile", "other", want["owner"].ProfileID, WritingStyleProfile{}, pgx.ErrNoRows},
+		{"missing profile", "owner", testID, WritingStyleProfile{}, pgx.ErrNoRows},
+		{"reserved account", "reserved", want["reserved"].ProfileID, WritingStyleProfile{}, pgx.ErrNoRows},
+		{"deleting account", "deleting", want["deleting"].ProfileID, WritingStyleProfile{}, pgx.ErrNoRows},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := store.WritingStyle(withAccount(ctx, Account{ID: ids[test.account]}), test.profileID)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("lookup error = %v, want %v", err, test.wantErr)
+			}
+			if err != nil {
+				if got != (WritingStyleProfile{}) {
+					t.Fatalf("failed lookup returned a profile: %+v", got)
+				}
+				return
+			}
+			got.CreatedAt = got.CreatedAt.UTC()
+			got.UpdatedAt = got.UpdatedAt.UTC()
+			if got != test.want {
+				t.Fatalf("profile = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDeleteWritingStyleRequiresAccount(t *testing.T) {
 	store := PostgresStore{}
 	for _, ctx := range []context.Context{

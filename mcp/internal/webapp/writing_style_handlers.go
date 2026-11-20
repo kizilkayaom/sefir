@@ -115,3 +115,34 @@ func (s *Server) handleDeleteWritingStyle(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
+
+func (s *Server) handleExportWritingStyle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !uuidPattern.MatchString(id) {
+		fail(w, http.StatusBadRequest, "A writing profile UUID is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	profile, err := s.store.WritingStyle(ctx, id)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	output, err := writingstyle.ExportProfile(writingstyle.Profile{
+		FormatVersion: profile.FormatVersion,
+		Name:          profile.Name,
+		Language:      profile.Language,
+		Content:       profile.Content,
+	})
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "Could not export writing profile.")
+		return
+	}
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType(
+		"attachment",
+		map[string]string{"filename": "writing-profile-" + id + ".md"},
+	))
+	w.Write(output)
+}

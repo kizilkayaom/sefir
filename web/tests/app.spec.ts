@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 
@@ -89,6 +90,9 @@ async function mockAPI(page: Page) {
     writingProfileDeletes: [] as string[],
     writingProfileDeleteError: false,
     writingProfileDeleteWait: null as Promise<void> | null,
+    writingProfileExports: [] as string[],
+    writingProfileExportError: null as { status: number, error: string } | null,
+    writingProfileExportWait: null as Promise<void> | null,
     setupRequests: [] as Record<string, string>[],
     expired: false,
     drafts: [draft, missingRecipient],
@@ -187,6 +191,19 @@ async function mockAPI(page: Page) {
       if (state.writingProfileUploadError) return reply({ error: state.writingProfileUploadError.error }, state.writingProfileUploadError.status)
       state.writingProfiles.unshift(uploadedWritingProfile)
       return reply(uploadedWritingProfile, 201)
+    }
+    if (path.startsWith('/api/settings/writing-styles/') && path.endsWith('/export') && method === 'GET') {
+      const id = decodeURIComponent(path.split('/').at(-2)!)
+      state.writingProfileExports.push(id)
+      if (state.writingProfileExportWait) await state.writingProfileExportWait
+      if (state.writingProfileExportError) return reply({ error: state.writingProfileExportError.error }, state.writingProfileExportError.status)
+      const profile = state.writingProfiles.find((item) => item.profile_id === id)
+      if (!profile) return reply({ error: 'Record not found' }, 404)
+      return route.fulfill({
+        contentType: 'text/markdown; charset=utf-8',
+        headers: { 'Content-Disposition': `attachment; filename="writing-profile-${id}.md"` },
+        body: `---\nformat_version: ${profile.format_version}\nname: ${JSON.stringify(profile.name)}\nlanguage: ${profile.language}\n---\n${profile.content}`,
+      })
     }
     if (path.startsWith('/api/settings/writing-styles/') && method === 'DELETE') {
       const id = decodeURIComponent(path.split('/').at(-1)!)
@@ -836,6 +853,7 @@ test('uploading a writing profile from another page returns to the newest profil
   try {
     await expect(profiles.getByRole('button', { name: 'Uploading…' })).toBeDisabled()
     await expect(profiles.getByRole('button', { name: 'Delete profile', exact: true })).toBeDisabled()
+    await expect(profiles.getByRole('button', { name: 'Export profile', exact: true })).toBeDisabled()
     await expect(profiles.getByRole('button', { name: 'Previous' })).toBeDisabled()
     expect(state.writingProfileDeletes).toHaveLength(0)
   } finally {
@@ -927,6 +945,8 @@ test('deleting a writing profile requires confirmation and disables controls unt
   try {
     await expect(target.getByRole('button', { name: 'Deleting…' })).toBeDisabled()
     await expect(other.getByRole('button', { name: 'Delete profile' })).toBeDisabled()
+    await expect(target.getByRole('button', { name: 'Export profile' })).toBeDisabled()
+    await expect(other.getByRole('button', { name: 'Export profile' })).toBeDisabled()
     await expect(input).toBeDisabled()
     await expect(profiles.getByRole('button', { name: 'Upload profile', exact: true })).toBeDisabled()
     await expect(profiles.getByRole('button', { name: 'Refresh' })).toBeDisabled()
@@ -999,6 +1019,142 @@ test('failed writing profile deletion preserves the list and can be retried', as
   await expect(profiles.getByRole('form', { name: 'Upload writing profile' }).getByRole('status')).toHaveText('Writing profile uploaded.')
   await expect(profiles.getByRole('heading', { name: uploadedWritingProfile.name })).toBeVisible()
 })
+
+test('exporting a writing profile downloads Markdown and disables controls while pending', async ({ page }) => {
+  const state = await mockAPI(page)
+  const profile = { ...writingProfile, name: 'Sıcak: "doğrudan"', language: 'tr', content: 'Kısa cümleler kullan.\n\n' + writingProfile.content }
+  state.writingProfiles = [profile, uploadedWritingProfile]
+  let finishExport!: () => void
+  state.writingProfileExportWait = new Promise<void>((resolve) => { finishExport = resolve })
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  const target = profiles.getByRole('listitem').filter({ has: page.getByRole('heading', { name: profile.name }) })
+  const other = profiles.getByRole('listitem').filter({ has: page.getByRole('heading', { name: uploadedWritingProfile.name }) })
+  const input = profiles.getByLabel('Markdown profile')
+  await input.setInputFiles(writingProfileFile)
+  const downloaded = page.waitForEvent('download')
+  await target.getByRole('button', { name: 'Export profile' }).click()
+  try {
+    await expect(target.getByRole('button', { name: 'Exporting…' })).toBeDisabled()
+    await expect(other.getByRole('button', { name: 'Export profile' })).toBeDisabled()
+    await expect(target.getByRole('button', { name: 'Delete profile' })).toBeDisabled()
+    await expect(other.getByRole('button', { name: 'Delete profile' })).toBeDisabled()
+    await expect(input).toBeDisabled()
+    for (const name of ['Upload profile', 'Previous', 'Next', 'Refresh']) {
+      await expect(profiles.getByRole('button', { name, exact: true })).toBeDisabled()
+    }
+    await expect.poll(() => state.writingProfileExports).toEqual([profile.profile_id])
+  } finally {
+    finishExport()
+  }
+  const download = await downloaded
+  expect(download.suggestedFilename()).toBe(`writing-profile-${profile.profile_id}.md`)
+  const path = await download.path()
+  expect(path).not.toBeNull()
+  expect(await readFile(path!, 'utf8')).toBe(
+    `---\nformat_version: 1\nname: ${JSON.stringify(profile.name)}\nlanguage: tr\n---\n${profile.content}`,
+  )
+  await expect(target.getByRole('button', { name: 'Export profile' })).toBeEnabled()
+  await expect(other.getByRole('button', { name: 'Export profile' })).toBeEnabled()
+  await expect(input).toBeEnabled()
+  await expect(input).toHaveValue(/warm\.MD$/)
+  await expect(profiles.getByRole('button', { name: 'Upload profile', exact: true })).toBeEnabled()
+  await expect(profiles.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+  await expect(profiles.getByRole('alert')).toHaveCount(0)
+  await expect(profiles.getByRole('listitem')).toHaveCount(2)
+  await expect(page.locator('a[href^="blob:"]')).toHaveCount(0)
+  expect(page.url()).toContain('/#settings')
+  expect(state.writingProfileRequests).toEqual([{ limit: 25, offset: 0 }])
+  expect(state.writingProfileUploads).toHaveLength(0)
+  expect(state.writingProfileDeletes).toHaveLength(0)
+})
+
+for (const failure of [
+  { status: 404, error: 'Record not found' },
+  { status: 503, error: 'Database operation failed. Please try again.' },
+]) {
+  test(`writing profile export failure ${failure.status} preserves the profile and can be retried`, async ({ page }) => {
+    const state = await mockAPI(page)
+    state.writingProfiles = [writingProfile]
+    state.writingProfileExportError = failure
+    let downloads = 0
+    page.on('download', () => { downloads++ })
+    await page.goto('/#settings')
+    const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+    const button = profiles.getByRole('button', { name: 'Export profile' })
+    await button.click()
+    await expect(profiles.getByRole('alert')).toHaveText(failure.error)
+    await expect(button).toBeEnabled()
+    await expect(profiles.getByRole('heading', { name: writingProfile.name })).toBeVisible()
+    expect(downloads).toBe(0)
+    state.writingProfileExportError = null
+    const downloaded = page.waitForEvent('download')
+    await button.click()
+    const download = await downloaded
+    expect(download.suggestedFilename()).toBe(`writing-profile-${writingProfile.profile_id}.md`)
+    await expect(button).toBeEnabled()
+    await expect(profiles.getByRole('alert')).toHaveCount(0)
+    expect(downloads).toBe(1)
+    expect(state.writingProfileExports).toEqual([writingProfile.profile_id, writingProfile.profile_id])
+    expect(state.writingProfileRequests).toEqual([{ limit: 25, offset: 0 }])
+  })
+}
+
+test('writing profile export shows a fallback error for a non-JSON response', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  await page.route('**/api/settings/writing-styles/*/export', (route) =>
+    route.fulfill({ status: 502, contentType: 'text/html', body: '<h1>Bad gateway</h1>' }),
+  )
+  let downloads = 0
+  page.on('download', () => { downloads++ })
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  await profiles.getByRole('button', { name: 'Export profile' }).click()
+  await expect(profiles.getByRole('alert')).toHaveText('The request failed. Please try again.')
+  await expect(profiles.getByRole('button', { name: 'Export profile' })).toBeEnabled()
+  await expect(profiles.getByRole('heading', { name: writingProfile.name })).toBeVisible()
+  expect(downloads).toBe(0)
+})
+
+test('writing profile export returns to sign in when the session expires', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  let downloads = 0
+  page.on('download', () => { downloads++ })
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  await expect(profiles.getByRole('heading', { name: writingProfile.name })).toBeVisible()
+  state.expired = true
+  await profiles.getByRole('button', { name: 'Export profile' }).click()
+  await expect(page.getByLabel('Password', { exact: true })).toBeVisible()
+  await expect(profiles).toHaveCount(0)
+  expect(downloads).toBe(0)
+})
+
+test('writing profile export errors are cleared by new uploads and deletions', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  state.writingProfileExportError = { status: 503, error: 'Database operation failed. Please try again.' }
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  const target = profiles.getByRole('listitem').filter({ has: page.getByRole('heading', { name: writingProfile.name }) })
+  await target.getByRole('button', { name: 'Export profile' }).click()
+  await expect(profiles.getByRole('alert')).toHaveText(state.writingProfileExportError.error)
+  await profiles.getByLabel('Markdown profile').setInputFiles(writingProfileFile)
+  await profiles.getByRole('button', { name: 'Upload profile', exact: true }).click()
+  await expect(profiles.getByRole('form', { name: 'Upload writing profile' }).getByRole('status')).toHaveText('Writing profile uploaded.')
+  await expect(profiles.getByRole('alert')).toHaveCount(0)
+  await target.getByRole('button', { name: 'Export profile' }).click()
+  await expect(profiles.getByRole('alert')).toHaveText(state.writingProfileExportError.error)
+  await expect(profiles.getByText('Writing profile uploaded.', { exact: true })).toHaveCount(0)
+  page.once('dialog', (dialog) => dialog.accept())
+  await target.getByRole('button', { name: 'Delete profile' }).click()
+  await expect(profiles.getByRole('status').filter({ hasText: 'Writing profile deleted.' })).toBeVisible()
+  await expect(profiles.getByRole('alert')).toHaveCount(0)
+  await expect(target).toHaveCount(0)
+})
+
 
 test('the operator can save, replace, and remove shared AI configuration', async ({ page }) => {
   const state = await mockAPI(page)

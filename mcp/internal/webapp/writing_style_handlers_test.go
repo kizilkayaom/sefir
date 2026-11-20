@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -484,5 +485,153 @@ func TestHandleDeleteWritingStyleHandlesStoreErrors(t *testing.T) {
 				t.Fatalf("unexpected error response: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleDeleteCalls)
 			}
 		})
+	}
+}
+
+func TestHandleExportWritingStyle(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, _ := login(t, server)
+	accountID := server.sessions[cookie.Value].AccountID
+	created := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
+	store.writingStyle = WritingStyleProfile{
+		ProfileID: testID, Name: "Sıcak: \"doğrudan\"", Language: "tr",
+		Content:       "\n## Style\nKısa cümleler kullan.  \n\n---\n\n    Keep this indentation.\n",
+		FormatVersion: 1, Revision: 3, CreatedAt: created, UpdatedAt: created.Add(time.Hour),
+	}
+	before := time.Now()
+	response := request(server, "GET", "/api/settings/writing-styles/"+testID+"/export", "", cookie, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("export writing style: %d %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Content-Type") != "text/markdown; charset=utf-8" || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unexpected download headers: %v", response.Header())
+	}
+	disposition, params, err := mime.ParseMediaType(response.Header().Get("Content-Disposition"))
+	if err != nil || disposition != "attachment" || params["filename"] != "writing-profile-"+testID+".md" {
+		t.Fatalf("unexpected download filename: %q: %v", response.Header().Get("Content-Disposition"), err)
+	}
+	got, err := writingstyle.ParseProfile(params["filename"], response.Body.Bytes())
+	if err != nil {
+		t.Fatalf("parse downloaded profile: %v", err)
+	}
+	want := writingstyle.Profile{
+		FormatVersion: store.writingStyle.FormatVersion, Name: store.writingStyle.Name,
+		Language: store.writingStyle.Language, Content: store.writingStyle.Content,
+	}
+	if got != want {
+		t.Fatalf("downloaded profile = %+v, want %+v", got, want)
+	}
+	if store.writingStyleLookupCalls != 1 || store.writingStyleLookupID != testID || store.writingStyleLookupAccountID != accountID {
+		t.Fatalf("wrong storage request: account=%s profile=%s calls=%d", store.writingStyleLookupAccountID, store.writingStyleLookupID, store.writingStyleLookupCalls)
+	}
+	if store.writingStyleLookupDeadline.Before(before.Add(5*time.Second)) || store.writingStyleLookupDeadline.After(time.Now().Add(5*time.Second)) {
+		t.Fatal("storage did not receive a five-second deadline")
+	}
+}
+
+func TestHandleExportWritingStyleRejectsInvalidID(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, _ := login(t, server)
+	for _, id := range []string{"not-a-uuid", testID + "-extra", "gggggggg-1111-4111-8111-111111111111"} {
+		t.Run(id, func(t *testing.T) {
+			response := request(server, "GET", "/api/settings/writing-styles/"+id+"/export", "", cookie, "")
+			var result map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != http.StatusBadRequest || len(result) != 1 || result["error"] != "A writing profile UUID is required" || store.writingStyleLookupCalls != 0 {
+				t.Fatalf("invalid ID reached storage or returned the wrong error: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleLookupCalls)
+			}
+			if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Content-Disposition") != "" {
+				t.Fatalf("invalid ID returned download headers: %v", response.Header())
+			}
+		})
+	}
+}
+
+func TestHandleExportWritingStyleRequiresActiveSession(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, _ := login(t, server)
+	accountID := server.sessions[cookie.Value].AccountID
+	for _, test := range []struct {
+		name     string
+		cookie   *http.Cookie
+		deleting bool
+		status   int
+		message  string
+	}{
+		{name: "missing session", status: 401, message: "Sign in to continue"},
+		{name: "unknown session", cookie: &http.Cookie{Name: cookie.Name, Value: "unknown"}, status: 401, message: "Sign in to continue"},
+		{name: "deleting account", cookie: cookie, deleting: true, status: 404, message: "Record not found"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.deleting {
+				if err := server.accounts.RequestDeletion(context.Background(), accountID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			response := request(server, "GET", "/api/settings/writing-styles/"+testID+"/export", "", test.cookie, "")
+			var result map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != test.status || len(result) != 1 || result["error"] != test.message || store.writingStyleLookupCalls != 0 {
+				t.Fatalf("unauthorized export: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleLookupCalls)
+			}
+			if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Content-Disposition") != "" {
+				t.Fatalf("unauthorized export returned download headers: %v", response.Header())
+			}
+		})
+	}
+}
+
+func TestHandleExportWritingStyleHandlesStoreErrors(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, _ := login(t, server)
+	for _, test := range []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{"not found", pgx.ErrNoRows, 404, "Record not found"},
+		{"database error", errors.New("private database details"), 503, "Database operation failed. Please try again."},
+		{"deadline exceeded", context.DeadlineExceeded, 503, "Database operation failed. Please try again."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store.err = test.err
+			calls := store.writingStyleLookupCalls
+			response := request(server, "GET", "/api/settings/writing-styles/"+testID+"/export", "", cookie, "")
+			var result map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != test.status || len(result) != 1 || result["error"] != test.message || store.writingStyleLookupCalls != calls+1 {
+				t.Fatalf("unexpected error response: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleLookupCalls)
+			}
+			if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Content-Disposition") != "" {
+				t.Fatalf("failed lookup returned download headers: %v", response.Header())
+			}
+		})
+	}
+}
+
+func TestHandleExportWritingStyleRejectsInvalidStoredProfile(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, _ := login(t, server)
+	store.writingStyle = WritingStyleProfile{
+		ProfileID: testID, Name: "Warm", Language: "en", Content: "Use short sentences.",
+		FormatVersion: 2, Revision: 1,
+	}
+	response := request(server, "GET", "/api/settings/writing-styles/"+testID+"/export", "", cookie, "")
+	var result map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusInternalServerError || len(result) != 1 || result["error"] != "Could not export writing profile." || store.writingStyleLookupCalls != 1 {
+		t.Fatalf("invalid stored profile was exported or returned the wrong error: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleLookupCalls)
+	}
+	if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Content-Disposition") != "" {
+		t.Fatalf("invalid stored profile returned download headers: %v", response.Header())
 	}
 }

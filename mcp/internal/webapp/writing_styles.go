@@ -103,3 +103,38 @@ func (s PostgresStore) DeleteWritingStyle(ctx context.Context, profileID string)
 	}
 	return nil
 }
+func (s PostgresStore) WritingStyle(
+	ctx context.Context,
+	profileID string,
+) (WritingStyleProfile, error) {
+	accountID, err := contextAccountID(ctx)
+	if err != nil {
+		return WritingStyleProfile{}, err
+	}
+
+	var profile WritingStyleProfile
+	query := `
+		SELECT p.profile_id::text, p.name, p.language, p.content, p.format_version,
+			p.revision, p.created_at, p.updated_at
+		FROM writing_style_profiles p
+		JOIN accounts a ON a.account_id=p.account_id
+		WHERE p.account_id=$1 AND p.profile_id=$2
+			AND NOT a.legacy_reserved AND a.deletion_requested_at IS NULL
+	`
+
+	err = s.Pool.QueryRow(ctx, query, accountID, profileID).Scan(
+		&profile.ProfileID,
+		&profile.Name,
+		&profile.Language,
+		&profile.Content,
+		&profile.FormatVersion,
+		&profile.Revision,
+		&profile.CreatedAt,
+		&profile.UpdatedAt,
+	)
+	if err != nil {
+		return WritingStyleProfile{}, err
+	}
+
+	return profile, nil
+}
