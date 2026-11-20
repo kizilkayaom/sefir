@@ -481,6 +481,96 @@ func TestPostgresUpdateWritingStyle(t *testing.T) {
 	}
 }
 
+func TestPostgresUpdateWritingStyleAccountIsolation(t *testing.T) {
+	pool := accountTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, "CREATE TEMP TABLE writing_style_profiles (LIKE public.writing_style_profiles INCLUDING ALL)"); err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]string)
+	profiles := make(map[string]WritingStyleProfile)
+	for _, name := range []string{"owner", "other", "reserved", "deleting"} {
+		var id string
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO accounts (username, legacy_reserved, deletion_requested_at)
+			VALUES ($1, $2, CASE WHEN $3::boolean THEN now() ELSE NULL END)
+			RETURNING account_id::text`, name, name == "reserved", name == "deleting").Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = id
+		profile := WritingStyleProfile{
+			Name: name + " style", Language: "en", Content: "Keep it clear.",
+			FormatVersion: 1, Revision: 3, CreatedAt: time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC),
+		}
+		profile.UpdatedAt = profile.CreatedAt.Add(time.Minute)
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO writing_style_profiles (account_id, name, language, content,
+				format_version, revision, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING profile_id::text`, id, profile.Name, profile.Language, profile.Content,
+			profile.FormatVersion, profile.Revision, profile.CreatedAt, profile.UpdatedAt).Scan(&profile.ProfileID); err != nil {
+			t.Fatal(err)
+		}
+		profiles[name] = profile
+	}
+	store := PostgresStore{Pool: pool}
+	update := writingstyle.Profile{
+		FormatVersion: 1, Name: "Changed style", Language: "tr", Content: "Use short sentences.",
+	}
+	for _, test := range []struct {
+		name             string
+		account          string
+		profileID        string
+		expectedRevision int
+	}{
+		{"other account's profile", "owner", profiles["other"].ProfileID, 3},
+		{"other account's profile with wrong revision", "owner", profiles["other"].ProfileID, 2},
+		{"missing profile", "owner", testID, 3},
+		{"reserved account", "reserved", profiles["reserved"].ProfileID, 3},
+		{"deleting account", "deleting", profiles["deleting"].ProfileID, 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			saved, err := store.UpdateWritingStyle(withAccount(ctx, Account{ID: ids[test.account]}),
+				test.profileID, test.expectedRevision, update)
+			if !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("update error = %v, want pgx.ErrNoRows", err)
+			}
+			if saved != (WritingStyleProfile{}) {
+				t.Fatalf("rejected update returned a profile: %+v", saved)
+			}
+			var count int
+			if err := pool.QueryRow(ctx, "SELECT count(*) FROM writing_style_profiles").Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != len(profiles) {
+				t.Fatalf("profile count = %d, want %d", count, len(profiles))
+			}
+			for name, want := range profiles {
+				var accountID string
+				var stored WritingStyleProfile
+				if err := pool.QueryRow(ctx, `
+					SELECT account_id::text, profile_id::text, name, language, content,
+						format_version, revision, created_at, updated_at
+					FROM writing_style_profiles WHERE profile_id=$1`, want.ProfileID).Scan(
+					&accountID, &stored.ProfileID, &stored.Name, &stored.Language, &stored.Content,
+					&stored.FormatVersion, &stored.Revision, &stored.CreatedAt, &stored.UpdatedAt,
+				); err != nil {
+					t.Fatalf("read %s profile: %v", name, err)
+				}
+				if accountID != ids[name] {
+					t.Fatalf("%s profile account = %s, want %s", name, accountID, ids[name])
+				}
+				stored.CreatedAt = stored.CreatedAt.UTC()
+				stored.UpdatedAt = stored.UpdatedAt.UTC()
+				if stored != want {
+					t.Fatalf("%s profile changed: %+v, want %+v", name, stored, want)
+				}
+			}
+		})
+	}
+}
+
 func TestDeleteWritingStyleRequiresAccount(t *testing.T) {
 	store := PostgresStore{}
 	for _, ctx := range []context.Context{

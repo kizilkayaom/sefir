@@ -101,6 +101,42 @@ func (s *Server) handleUploadWritingStyle(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusCreated, saved)
 }
 
+func (s *Server) handleUpdateWritingStyle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !uuidPattern.MatchString(id) {
+		fail(w, http.StatusBadRequest, "A writing profile UUID is required")
+		return
+	}
+	var input struct {
+		ExpectedRevision int    `json:"expected_revision"`
+		Markdown         string `json:"markdown"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	if input.ExpectedRevision < 1 || input.ExpectedRevision >= 2147483647 {
+		fail(w, http.StatusUnprocessableEntity, "Expected revision must be between 1 and 2147483646")
+		return
+	}
+	profile, err := writingstyle.ParseProfile("profile.md", []byte(input.Markdown))
+	if err != nil {
+		fail(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	saved, err := s.store.UpdateWritingStyle(ctx, id, input.ExpectedRevision, profile)
+	if errors.Is(err, ErrWritingStyleConflict) {
+		fail(w, http.StatusConflict, "This writing profile has changed. Reload it before saving.")
+		return
+	}
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
 func (s *Server) handleDeleteWritingStyle(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !uuidPattern.MatchString(id) {

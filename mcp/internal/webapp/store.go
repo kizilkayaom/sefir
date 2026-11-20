@@ -57,6 +57,7 @@ type Store interface {
 	CreateWritingStyle(context.Context, writingstyle.Profile) (WritingStyleProfile, error)
 	WritingStyles(context.Context, int, int) ([]WritingStyleProfile, error)
 	WritingStyle(context.Context, string) (WritingStyleProfile, error)
+	UpdateWritingStyle(context.Context, string, int, writingstyle.Profile) (WritingStyleProfile, error)
 	DeleteWritingStyle(context.Context, string) error
 }
 

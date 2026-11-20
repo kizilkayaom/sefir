@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 
-export function useUnsavedChanges(dirty: boolean) {
+export function useUnsavedChanges(dirty: boolean, message = 'Discard your unsaved email changes?') {
   useEffect(() => {
     if (!dirty) return
     const beforeUnload = (event: BeforeUnloadEvent) => event.preventDefault()
@@ -9,7 +9,7 @@ export function useUnsavedChanges(dirty: boolean) {
       const anchor = event.target.closest('a[href]')
       const signOut = event.target.closest('[data-discard-email]')
       if (!signOut && (!(anchor instanceof HTMLAnchorElement) || anchor.href === window.location.href)) return
-      if (!window.confirm('Discard your unsaved email changes?')) {
+      if (!window.confirm(message)) {
         event.preventDefault()
         event.stopPropagation()
       }
@@ -20,5 +20,5 @@ export function useUnsavedChanges(dirty: boolean) {
       window.removeEventListener('beforeunload', beforeUnload)
       document.removeEventListener('click', navigate, true)
     }
-  }, [dirty])
+  }, [dirty, message])
 }

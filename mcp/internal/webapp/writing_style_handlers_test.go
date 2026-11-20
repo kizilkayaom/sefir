@@ -379,6 +379,199 @@ func TestUploadWritingStyleHandlesStoreErrors(t *testing.T) {
 	}
 }
 
+func writingStyleUpdateBody(t *testing.T, revision int, markdown string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"expected_revision": revision, "markdown": markdown})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func TestHandleUpdateWritingStyle(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	accountID := server.sessions[cookie.Value].AccountID
+	want := writingstyle.Profile{
+		FormatVersion: 1, Name: "Warm and direct", Language: "en",
+		Content: "## Style\nUse short sentences.\n\n---\n\n    Keep this indentation.\n",
+	}
+	created := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	store.writingStyle = WritingStyleProfile{
+		ProfileID: testID, Name: want.Name, Language: want.Language, Content: want.Content,
+		FormatVersion: 1, CreatedAt: created, UpdatedAt: created.Add(time.Hour),
+	}
+	for _, test := range []struct {
+		name     string
+		revision int
+		markdown string
+	}{
+		{"valid update", 3, validWritingStyleUpload},
+		{"first revision", 1, validWritingStyleUpload},
+		{"highest editable revision and CRLF", 2147483646, strings.ReplaceAll(validWritingStyleUpload, "\n", "\r\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store.writingStyle.Revision = test.revision + 1
+			body := writingStyleUpdateBody(t, test.revision, test.markdown)
+			calls := store.writingStyleUpdateCalls
+			before := time.Now()
+			response := request(server, "PUT", "/api/settings/writing-styles/"+testID, body, cookie, csrf)
+			if response.Code != http.StatusOK {
+				t.Fatalf("update writing style: %d %s", response.Code, response.Body.String())
+			}
+			var saved WritingStyleProfile
+			if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved != store.writingStyle {
+				t.Fatalf("response profile = %+v, want %+v", saved, store.writingStyle)
+			}
+			if store.writingStyleUpdateCalls != calls+1 || store.writingStyleUpdateID != testID ||
+				store.writingStyleUpdateRevision != test.revision || store.writingStyleUpdateInput != want ||
+				store.writingStyleUpdateAccountID != accountID {
+				t.Fatalf("wrong storage request: account=%s profile=%s revision=%d input=%+v calls=%d",
+					store.writingStyleUpdateAccountID, store.writingStyleUpdateID, store.writingStyleUpdateRevision,
+					store.writingStyleUpdateInput, store.writingStyleUpdateCalls)
+			}
+			if store.writingStyleUpdateDeadline.Before(before.Add(5*time.Second)) || store.writingStyleUpdateDeadline.After(time.Now().Add(5*time.Second)) {
+				t.Fatal("storage did not receive a five-second deadline")
+			}
+			if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("unexpected response headers: %v", response.Header())
+			}
+		})
+	}
+}
+
+func TestHandleUpdateWritingStyleRejectsInvalidRequests(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	body := writingStyleUpdateBody(t, 3, validWritingStyleUpload)
+	for _, test := range []struct {
+		name        string
+		id          string
+		body        string
+		contentType string
+		status      int
+	}{
+		{name: "invalid UUID", id: "not-a-uuid", body: body, status: 400},
+		{name: "malformed JSON", body: "{", status: 400},
+		{name: "trailing JSON", body: body + " {}", status: 400},
+		{name: "unknown field", body: strings.TrimSuffix(body, "}") + `,"account_id":"other"}`, status: 400},
+		{name: "fractional revision", body: strings.Replace(body, `"expected_revision":3`, `"expected_revision":1.5`, 1), status: 400},
+		{name: "missing revision", body: strings.Replace(body, `"expected_revision":3,`, "", 1), status: 422},
+		{name: "zero revision", body: writingStyleUpdateBody(t, 0, validWritingStyleUpload), status: 422},
+		{name: "negative revision", body: writingStyleUpdateBody(t, -1, validWritingStyleUpload), status: 422},
+		{name: "revision overflow", body: writingStyleUpdateBody(t, 2147483647, validWritingStyleUpload), status: 422},
+		{name: "null request", body: "null", status: 422},
+		{name: "missing Markdown", body: `{"expected_revision":3}`, status: 422},
+		{name: "invalid profile", body: writingStyleUpdateBody(t, 3, "No frontmatter"), status: 422},
+		{name: "oversized Markdown", body: writingStyleUpdateBody(t, 3, validWritingStyleUpload+strings.Repeat("x", 16*1024)), status: 422},
+		{name: "oversized profile", body: writingStyleUpdateBody(t, 3, strings.Repeat("x", 32*1024+1)), status: 422},
+		{name: "wrong content type", body: body, contentType: "text/plain", status: 415},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			id := test.id
+			if id == "" {
+				id = testID
+			}
+			contentType := test.contentType
+			if contentType == "" {
+				contentType = "application/json"
+			}
+			r := httptest.NewRequest(http.MethodPut, "http://localhost:8080/api/settings/writing-styles/"+id, strings.NewReader(test.body))
+			r.Header.Set("Origin", "http://localhost:8080")
+			r.Header.Set("Content-Type", contentType)
+			r.Header.Set("X-CSRF-Token", csrf)
+			r.AddCookie(cookie)
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, r)
+			var result map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != test.status || len(result) != 1 || result["error"] == "" || store.writingStyleUpdateCalls != 0 {
+				t.Fatalf("invalid update: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleUpdateCalls)
+			}
+		})
+	}
+}
+
+func TestHandleUpdateWritingStyleRequiresSessionAndCSRF(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	body := writingStyleUpdateBody(t, 3, validWritingStyleUpload)
+	for _, test := range []struct {
+		name   string
+		cookie *http.Cookie
+		csrf   string
+		origin string
+		status int
+	}{
+		{name: "missing session", csrf: csrf, origin: "http://localhost:8080", status: 401},
+		{name: "unknown session", cookie: &http.Cookie{Name: cookie.Name, Value: "unknown"}, csrf: csrf, origin: "http://localhost:8080", status: 401},
+		{name: "missing CSRF", cookie: cookie, origin: "http://localhost:8080", status: 403},
+		{name: "wrong CSRF", cookie: cookie, csrf: "incorrect", origin: "http://localhost:8080", status: 403},
+		{name: "missing origin", cookie: cookie, csrf: csrf, status: 403},
+		{name: "wrong origin", cookie: cookie, csrf: csrf, origin: "https://other.example", status: 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPut, "http://localhost:8080/api/settings/writing-styles/"+testID, strings.NewReader(body))
+			r.Header.Set("Origin", test.origin)
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("X-CSRF-Token", test.csrf)
+			if test.cookie != nil {
+				r.AddCookie(test.cookie)
+			}
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, r)
+			if response.Code != test.status || store.writingStyleUpdateCalls != 0 {
+				t.Fatalf("unauthorized update: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleUpdateCalls)
+			}
+		})
+	}
+	t.Run("deleting account", func(t *testing.T) {
+		accountID := server.sessions[cookie.Value].AccountID
+		if err := server.accounts.RequestDeletion(context.Background(), accountID); err != nil {
+			t.Fatal(err)
+		}
+		response := request(server, "PUT", "/api/settings/writing-styles/"+testID, body, cookie, csrf)
+		if response.Code != http.StatusNotFound || store.writingStyleUpdateCalls != 0 {
+			t.Fatalf("deleting account reached profile storage: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleUpdateCalls)
+		}
+	})
+}
+
+func TestHandleUpdateWritingStyleHandlesStoreErrors(t *testing.T) {
+	server, store, _, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	body := writingStyleUpdateBody(t, 3, validWritingStyleUpload)
+	for _, test := range []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{"conflict", fmt.Errorf("update: %w", ErrWritingStyleConflict), 409, "This writing profile has changed. Reload it before saving."},
+		{"not found", pgx.ErrNoRows, 404, "Record not found"},
+		{"database error", errors.New("private database details"), 503, "Database operation failed. Please try again."},
+		{"deadline exceeded", context.DeadlineExceeded, 503, "Database operation failed. Please try again."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store.err = test.err
+			calls := store.writingStyleUpdateCalls
+			response := request(server, "PUT", "/api/settings/writing-styles/"+testID, body, cookie, csrf)
+			var result map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != test.status || len(result) != 1 || result["error"] != test.message || store.writingStyleUpdateCalls != calls+1 {
+				t.Fatalf("unexpected error response: %d %s; store calls: %d", response.Code, response.Body.String(), store.writingStyleUpdateCalls)
+			}
+		})
+	}
+}
+
 func TestHandleDeleteWritingStyle(t *testing.T) {
 	server, store, _, _ := fixture(t)
 	cookie, csrf := login(t, server)

@@ -127,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/google/callback", s.protect(s.handleGmailCallback))
 	mux.HandleFunc("GET /api/settings/writing-styles", s.protect(s.handleWritingStyles))
 	mux.HandleFunc("POST /api/settings/writing-styles", s.protect(s.handleUploadWritingStyle))
+	mux.HandleFunc("PUT /api/settings/writing-styles/{id}", s.protect(s.handleUpdateWritingStyle))
 	mux.HandleFunc("DELETE /api/settings/writing-styles/{id}", s.protect(s.handleDeleteWritingStyle))
 	mux.HandleFunc("GET /api/settings/writing-styles/{id}/export", s.protect(s.handleExportWritingStyle))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
