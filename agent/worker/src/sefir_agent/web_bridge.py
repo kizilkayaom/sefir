@@ -15,7 +15,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from sefir_agent.providers import ProviderConfigurationError, provider_catalog
-from sefir_agent.styles import get_tone_preset
+from sefir_agent.styles import get_tone_preset, parse_custom_profile
 from sefir_agent.workflow_types import ApprovalWorkflowInput, DraftApproval
 
 
@@ -95,20 +95,34 @@ async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     if action == "generate":
         from sefir_agent.drafting import draft_outreach
 
-        preset = get_tone_preset(payload.get("preset_id"))
+        raw_profile = payload.get("custom_profile")
+        style_arguments: dict[str, Any]
+        if raw_profile is None:
+            preset = get_tone_preset(payload.get("preset_id"))
+            style_arguments = {"preset_id": preset.id}
+            style_id, style_revision = preset.id, preset.revision
+        else:
+            if payload.get("preset_id") is not None:
+                raise ValueError(
+                    "Choose either a tone preset or a custom writing profile"
+                )
+            custom_profile = parse_custom_profile(raw_profile)
+            style_arguments = {"custom_profile": custom_profile}
+            style_id = f"custom:{custom_profile.profile_id}"
+            style_revision = custom_profile.revision
         try:
             draft = await draft_outreach(
                 payload["contact"],
                 payload["cv_text"],
                 payload.get("provider"),
-                preset_id=preset.id,
+                **style_arguments,
             )
         except ProviderConfigurationError:
             return {"error": "provider_unavailable"}
         return {
             **draft.model_dump(),
-            "preset_id": preset.id,
-            "preset_revision": preset.revision,
+            "preset_id": style_id,
+            "preset_revision": style_revision,
         }
     if action not in {
         "approve",

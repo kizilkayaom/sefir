@@ -22,7 +22,7 @@ from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from sefir_agent.providers import ProviderConfigurationError
-from sefir_agent.styles import PRESETS
+from sefir_agent.styles import PRESETS, CustomWritingProfile
 from sefir_agent.web_bridge import dispatch
 
 
@@ -1026,6 +1026,15 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.custom_profile = {
+            "profile_id": "55555555-5555-4555-8555-555555555555",
+            "revision": 3,
+            "name": "Warm and direct",
+            "language": "en",
+            "content": "Use short sentences.\n\n    Preserve indentation.\n",
+        }
+
     async def test_catalog_does_not_contact_a_model_or_temporal(self) -> None:
         with (
             patch.dict(os.environ, {"OPENAI_API_KEY": "openai-test-key"}, clear=True),
@@ -1111,6 +1120,161 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
             "Fictional resume",
             "anthropic",
             preset_id="formal",
+        )
+
+    async def test_generate_passes_custom_profile_and_uses_its_metadata(self) -> None:
+        draft = {"subject": "Hello", "body": "A fictional introduction."}
+        generated = {**draft, "preset_id": "model-chosen", "preset_revision": 99}
+        generate = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: generated))
+        with (
+            patch.dict(
+                sys.modules,
+                {"sefir_agent.drafting": SimpleNamespace(draft_outreach=generate)},
+            ),
+            patch("sefir_agent.web_bridge.get_tone_preset") as get_preset,
+            patch(
+                "sefir_agent.web_bridge.Client.connect", new_callable=AsyncMock
+            ) as connect,
+        ):
+            result = await dispatch(
+                "generate",
+                {
+                    "contact": {"name": "Alex Example"},
+                    "cv_text": "Fictional resume",
+                    "provider": "anthropic",
+                    "custom_profile": self.custom_profile,
+                },
+            )
+        self.assertEqual(
+            result,
+            {
+                **draft,
+                "preset_id": "custom:55555555-5555-4555-8555-555555555555",
+                "preset_revision": 3,
+            },
+        )
+        generate.assert_awaited_once_with(
+            {"name": "Alex Example"},
+            "Fictional resume",
+            "anthropic",
+            custom_profile=CustomWritingProfile(**self.custom_profile),
+        )
+        get_preset.assert_not_called()
+        connect.assert_not_awaited()
+
+    async def test_null_custom_profile_preserves_builtin_selection(self) -> None:
+        draft = {"subject": "Hello", "body": "A fictional introduction."}
+        generate = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: draft))
+        with patch.dict(
+            sys.modules,
+            {"sefir_agent.drafting": SimpleNamespace(draft_outreach=generate)},
+        ):
+            for preset_id in (None, "formal"):
+                with self.subTest(preset_id=preset_id):
+                    generate.reset_mock()
+                    result = await dispatch(
+                        "generate",
+                        {
+                            "contact": {"name": "Alex Example"},
+                            "cv_text": "Fictional resume",
+                            "provider": "openai",
+                            "preset_id": preset_id,
+                            "custom_profile": None,
+                        },
+                    )
+                    self.assertEqual(
+                        result,
+                        {
+                            **draft,
+                            "preset_id": preset_id or "prof",
+                            "preset_revision": 1,
+                        },
+                    )
+                    generate.assert_awaited_once_with(
+                        {"name": "Alex Example"},
+                        "Fictional resume",
+                        "openai",
+                        preset_id=preset_id or "prof",
+                    )
+
+    async def test_conflicting_styles_never_reach_drafting(self) -> None:
+        generate = AsyncMock()
+        with patch.dict(
+            sys.modules,
+            {"sefir_agent.drafting": SimpleNamespace(draft_outreach=generate)},
+        ):
+            for preset_id in ("prof", "formal", "", "unknown"):
+                with (
+                    self.subTest(preset_id=preset_id),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "Choose either a tone preset or a custom writing profile",
+                    ),
+                ):
+                    await dispatch(
+                        "generate",
+                        {
+                            "contact": {"name": "Alex Example"},
+                            "cv_text": "Fictional resume",
+                            "preset_id": preset_id,
+                            "custom_profile": self.custom_profile,
+                        },
+                    )
+        generate.assert_not_awaited()
+
+    async def test_invalid_custom_profiles_never_reach_drafting(self) -> None:
+        generate = AsyncMock()
+        with patch.dict(
+            sys.modules,
+            {"sefir_agent.drafting": SimpleNamespace(draft_outreach=generate)},
+        ):
+            for value in (
+                False,
+                "",
+                [],
+                {},
+                {**self.custom_profile, "profile_id": "not-a-uuid"},
+                {**self.custom_profile, "revision": True},
+                {**self.custom_profile, "name": " "},
+                {**self.custom_profile, "content": "text\x00"},
+                {**self.custom_profile, "content": "ğ" * (8 * 1024 + 1)},
+            ):
+                with (
+                    self.subTest(value=value),
+                    self.assertRaises((TypeError, ValueError)),
+                ):
+                    await dispatch(
+                        "generate",
+                        {
+                            "contact": {"name": "Alex Example"},
+                            "cv_text": "Fictional resume",
+                            "custom_profile": value,
+                        },
+                    )
+        generate.assert_not_awaited()
+
+    async def test_custom_profile_provider_errors_are_sanitized(self) -> None:
+        generate = AsyncMock(side_effect=ProviderConfigurationError("private details"))
+        with patch.dict(
+            sys.modules,
+            {"sefir_agent.drafting": SimpleNamespace(draft_outreach=generate)},
+        ):
+            result = await dispatch(
+                "generate",
+                {
+                    "contact": {"name": "Alex Example"},
+                    "cv_text": "Fictional resume",
+                    "provider": "openai",
+                    "preset_id": None,
+                    "custom_profile": self.custom_profile,
+                },
+            )
+        self.assertEqual(result, {"error": "provider_unavailable"})
+        generate.assert_awaited_once_with(
+            {"name": "Alex Example"},
+            "Fictional resume",
+            "openai",
+            custom_profile=CustomWritingProfile(**self.custom_profile),
         )
 
     async def test_provider_configuration_errors_are_sanitized(self) -> None:
