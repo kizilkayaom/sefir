@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 
 import { PageControls } from '@/components/page-controls'
 import { Button } from '@/components/ui/button'
+import { WritingProfileEditor } from '@/components/writing-profile-editor'
 import { useResource } from '@/hooks/use-resource'
 import { api, apiDownload, errorMessage } from '@/lib/api'
 import type { Page, WritingStyleProfile } from '@/types/api'
@@ -18,7 +19,9 @@ export function CustomWritingStyles() {
   const [deleteMessage, setDeleteMessage] = useState('')
   const [exportingID, setExportingID] = useState<string | null>(null)
   const [exportError, setExportError] = useState('')
-  const busy = uploading || deletingID !== null || exportingID !== null
+  const [editingProfile, setEditingProfile] = useState<WritingStyleProfile | null>(null)
+  const [editMessage, setEditMessage] = useState('')
+  const busy = uploading || deletingID !== null || exportingID !== null || editingProfile !== null
   const profiles = useResource<Page<WritingStyleProfile>>(
     `/api/settings/writing-styles?limit=25&offset=${offset}`,
   )
@@ -32,6 +35,7 @@ export function CustomWritingStyles() {
     setDeleteError('')
     setDeleteMessage('')
     setExportError('')
+    setEditMessage('')
     if (!file.name.toLowerCase().endsWith('.md')) {
       setUploadError('Choose a Markdown (.md) file.')
       return
@@ -68,6 +72,7 @@ export function CustomWritingStyles() {
     setUploadError('')
     setUploadMessage('')
     setExportError('')
+    setEditMessage('')
     setDeletingID(profile.profile_id)
     try {
       await api(`/api/settings/writing-styles/${profile.profile_id}`, { method: 'DELETE' })
@@ -88,6 +93,7 @@ export function CustomWritingStyles() {
     setUploadMessage('')
     setDeleteError('')
     setDeleteMessage('')
+    setEditMessage('')
     setExportingID(profile.profile_id)
     try {
       const blob = await apiDownload(`/api/settings/writing-styles/${encodeURIComponent(profile.profile_id)}/export`)
@@ -107,6 +113,17 @@ export function CustomWritingStyles() {
     } finally {
       setExportingID(null)
     }
+  }
+
+  function startEditing(profile: WritingStyleProfile) {
+    if (busy) return
+    setExportError('')
+    setUploadError('')
+    setUploadMessage('')
+    setDeleteError('')
+    setDeleteMessage('')
+    setEditMessage('')
+    setEditingProfile(profile)
   }
 
   return (
@@ -139,6 +156,23 @@ export function CustomWritingStyles() {
         {uploadMessage && <p role="status" className="text-sm">{uploadMessage}</p>}
         <Button type="submit" variant="outline" disabled={busy || !file}>{uploading ? 'Uploading…' : 'Upload profile'}</Button>
       </form>
+      {editingProfile && (
+        <WritingProfileEditor
+          key={`${editingProfile.profile_id}:${editingProfile.revision}`}
+          profile={editingProfile}
+          onSaved={() => {
+            setEditingProfile(null)
+            setEditMessage('Writing profile saved.')
+            profiles.reload()
+          }}
+          onCancel={() => setEditingProfile(null)}
+        />
+      )}
+      {editMessage && (
+        <p role="status" className="text-sm">
+          {editMessage}
+        </p>
+      )}
       {deleteError && <p role="alert" className="text-sm text-destructive">{deleteError}</p>}
       {deleteMessage && <p role="status" className="text-sm">{deleteMessage}</p>}
       {exportError && <p role="alert" className="text-sm text-destructive">{exportError}</p>}
@@ -177,6 +211,14 @@ export function CustomWritingStyles() {
                 </Button>
                 <Button type="button" variant="destructive" disabled={busy} onClick={() => remove(profile)}>
                   {deletingID === profile.profile_id ? 'Deleting…' : 'Delete profile'}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => startEditing(profile)}
+                >
+                  Edit profile
                 </Button>
               </div>
             </li>

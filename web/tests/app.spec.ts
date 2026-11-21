@@ -801,6 +801,109 @@ test('custom writing profiles distinguish loading and errors from an empty list 
   await expect(profiles.getByRole('button', { name: 'Next' })).toBeDisabled()
 })
 
+test('editing a writing profile locks list actions and refreshes the saved revision', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile, ...Array.from({ length: 25 }, (_, index) => ({
+    ...uploadedWritingProfile, profile_id: `profile-${index}`, name: `Other profile ${index + 1}`,
+  }))]
+  const updated = { ...writingProfile, name: 'Updated introduction', content: 'Use short paragraphs.\n', revision: 4 }
+  const markdown = '---\nformat_version: 1\nname: Updated introduction\nlanguage: en\n---\nUse short paragraphs.\n'
+  const updates: { expected_revision: number, markdown: string }[] = []
+  let finishSave!: () => void
+  const saveWait = new Promise<void>((resolve) => { finishSave = resolve })
+  await page.route(`**/api/settings/writing-styles/${writingProfile.profile_id}`, async (route) => {
+    expect(route.request().method()).toBe('PUT')
+    expect(route.request().headers()['x-csrf-token']).toBe('csrf-test')
+    updates.push(route.request().postDataJSON())
+    await saveWait
+    state.writingProfiles[0] = updated
+    await route.fulfill({ json: updated })
+  })
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  const upload = profiles.getByRole('form', { name: 'Upload writing profile' })
+  await upload.getByLabel('Markdown profile').setInputFiles(writingProfileFile)
+  await expect(profiles.getByRole('button', { name: 'Next', exact: true })).toBeEnabled()
+  await profiles.getByRole('button', { name: 'Edit profile', exact: true }).first().click()
+  const editor = profiles.getByRole('form', { name: 'Edit writing profile' })
+  const text = editor.getByLabel('Markdown profile')
+  await expect(text).toHaveValue(`---\nformat_version: 1\nname: "Personal introduction"\nlanguage: "en"\n---\n${writingProfile.content}`)
+  await expect(editor.getByRole('button', { name: 'Save profile' })).toBeDisabled()
+  try {
+    await expect(upload.getByLabel('Markdown profile')).toBeDisabled()
+    await expect(upload.getByRole('button', { name: 'Upload profile' })).toBeDisabled()
+    for (const name of ['Previous', 'Next', 'Refresh', 'Edit profile', 'Delete profile', 'Export profile']) {
+      await expect(profiles.getByRole('button', { name, exact: true }).first()).toBeDisabled()
+      await expect(profiles.getByRole('button', { name, exact: true }).last()).toBeDisabled()
+    }
+    await text.fill(markdown)
+    await editor.getByRole('button', { name: 'Save profile' }).click()
+    await expect(editor.getByRole('button', { name: 'Saving…' })).toBeDisabled()
+    await expect(editor.getByRole('button', { name: 'Cancel editing' })).toBeDisabled()
+    await expect(text).toBeDisabled()
+    await expect.poll(() => updates).toEqual([{ expected_revision: 3, markdown }])
+  } finally {
+    finishSave()
+  }
+  await expect(editor).toHaveCount(0)
+  await expect(profiles.getByRole('status')).toHaveText('Writing profile saved.')
+  await expect(profiles.getByRole('heading', { name: updated.name, exact: true })).toBeVisible()
+  await expect(profiles.getByText('en · Revision 4')).toBeVisible()
+  await expect(profiles.getByRole('button', { name: 'Next', exact: true })).toBeEnabled()
+  await expect(upload.getByRole('button', { name: 'Upload profile' })).toBeEnabled()
+  expect(state.writingProfileRequests).toEqual([{ limit: 25, offset: 0 }, { limit: 25, offset: 0 }])
+  expect(state.writingProfileUploads).toHaveLength(0)
+  expect(state.writingProfileDeletes).toHaveLength(0)
+  expect(state.writingProfileExports).toHaveLength(0)
+  await profiles.getByRole('button', { name: 'Edit profile', exact: true }).first().click()
+  await expect(profiles.getByText('Writing profile saved.', { exact: true })).toHaveCount(0)
+  await expect(editor.getByText('Update the name, language, and writing guidance. Saving updates revision 4.')).toBeVisible()
+  await expect(text).toHaveValue('---\nformat_version: 1\nname: "Updated introduction"\nlanguage: "en"\n---\nUse short paragraphs.\n')
+  await editor.getByRole('button', { name: 'Cancel editing' }).click()
+  await expect(editor).toHaveCount(0)
+})
+
+test('writing profile conflicts preserve edits and cancellation protects unsaved changes', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  let updates = 0
+  await page.route(`**/api/settings/writing-styles/${writingProfile.profile_id}`, async (route) => {
+    updates++
+    await route.fulfill({ status: 409, json: { error: 'This writing profile has changed. Reload it before saving.' } })
+  })
+  await page.goto('/#settings')
+  const profiles = page.getByRole('region', { name: 'Custom writing profiles' })
+  await profiles.getByRole('button', { name: 'Edit profile', exact: true }).click()
+  const editor = profiles.getByRole('form', { name: 'Edit writing profile' })
+  const text = editor.getByLabel('Markdown profile')
+  const markdown = (await text.inputValue()) + '\nKeep these unsaved changes.\n'
+  await text.fill(markdown)
+  await editor.getByRole('button', { name: 'Save profile' }).click()
+  await expect(editor.getByRole('alert')).toHaveText('This writing profile has changed. Reload it before saving.')
+  await expect(text).toHaveValue(markdown)
+  await expect(editor.getByRole('button', { name: 'Save profile' })).toBeEnabled()
+  page.once('dialog', async (dialog) => {
+    expect(dialog.message()).toBe('Discard your unsaved writing profile changes?')
+    await dialog.dismiss()
+  })
+  await editor.getByRole('button', { name: 'Cancel editing' }).click()
+  await expect(text).toHaveValue(markdown)
+  page.once('dialog', async (dialog) => {
+    expect(dialog.message()).toBe('Discard your unsaved writing profile changes?')
+    await dialog.dismiss()
+  })
+  await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+  await expect(text).toHaveValue(markdown)
+  page.once('dialog', (dialog) => dialog.accept())
+  await editor.getByRole('button', { name: 'Cancel editing' }).click()
+  await expect(editor).toHaveCount(0)
+  await expect(profiles.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
+  await expect(profiles.getByText('Writing profile saved.', { exact: true })).toHaveCount(0)
+  expect(updates).toBe(1)
+  expect(state.writingProfiles).toEqual([writingProfile])
+  expect(state.writingProfileRequests).toEqual([{ limit: 25, offset: 0 }])
+})
+
 test('uploading a writing profile sends the file and refreshes the first page', async ({ page }) => {
   const state = await mockAPI(page)
   let finishUpload!: () => void

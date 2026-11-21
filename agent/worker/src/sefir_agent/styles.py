@@ -9,6 +9,15 @@ class TonePreset:
     revision: int
 
 
+@dataclass(frozen=True)
+class CustomWritingProfile:
+    profile_id: str
+    revision: int
+    name: str
+    language: str
+    content: str
+
+
 prof = TonePreset(
     "prof", "Concise professional", "Keep the tone concise and professional", 1
 )
