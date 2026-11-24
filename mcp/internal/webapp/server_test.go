@@ -46,6 +46,7 @@ type fakeStore struct {
 	writingStyleLookupAccountID string
 	writingStyleLookupCalls     int
 	writingStyleLookupDeadline  time.Time
+	writingStyleLookupErr       error
 	writingStyleUpdateID        string
 	writingStyleUpdateRevision  int
 	writingStyleUpdateInput     writingstyle.Profile
@@ -104,6 +105,9 @@ func (f *fakeStore) WritingStyle(ctx context.Context, id string) (WritingStylePr
 	f.writingStyleLookupAccountID = contextAccount(ctx).ID
 	f.writingStyleLookupCalls++
 	f.writingStyleLookupDeadline, _ = ctx.Deadline()
+	if f.writingStyleLookupErr != nil {
+		return WritingStyleProfile{}, f.writingStyleLookupErr
+	}
 	return f.writingStyle, f.err
 }
 

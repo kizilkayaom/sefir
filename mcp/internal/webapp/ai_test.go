@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/kizilkayaom/sefir/mcp/internal/catalogue"
 )
 
@@ -244,6 +245,62 @@ func TestGenerationUsesCustomWritingProfile(t *testing.T) {
 	if store.draftInput.PresetID == nil || *store.draftInput.PresetID != "custom:"+profileID ||
 		store.draftInput.PresetRevision == nil || *store.draftInput.PresetRevision != 3 {
 		t.Fatal("generated draft lost its custom writing profile metadata")
+	}
+}
+
+func TestGenerationHandlesProfileLookupErrors(t *testing.T) {
+	const profileID = "22222222-2222-4222-8222-222222222222"
+	for _, test := range []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{
+			name:    "profile not found",
+			err:     pgx.ErrNoRows,
+			status:  404,
+			message: "Record not found",
+		},
+		{
+			name:    "database error",
+			err:     errors.New("private database details"),
+			status:  503,
+			message: "Database operation failed. Please try again.",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, store, bridge, _ := fixture(t)
+			cookie, csrf := login(t, server)
+			accountID := server.sessions[cookie.Value].AccountID
+			store.writingStyleLookupErr = test.err
+			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","provider":"anthropic","profile_id":"` + profileID + `"}`
+			response := request(server, "POST", "/api/drafts", body, cookie, csrf)
+			if response.Code != test.status {
+				t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+			}
+			var result struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Error != test.message {
+				t.Fatalf("unexpected error: got %q, want %q", result.Error, test.message)
+			}
+			if strings.Contains(response.Body.String(), "private database details") {
+				t.Fatal("response exposed private database details")
+			}
+			if store.writingStyleLookupCalls != 1 || store.writingStyleLookupID != profileID || store.writingStyleLookupAccountID != accountID {
+				t.Fatalf("wrong storage request: account=%s profile=%s calls=%d", store.writingStyleLookupAccountID, store.writingStyleLookupID, store.writingStyleLookupCalls)
+			}
+			if len(bridge.calls) != 0 || store.draftInput != (catalogue.CreateDraftInput{}) {
+				t.Fatal("failed profile lookup reached generation or saved a draft")
+			}
+			if len(server.generating) != 0 {
+				t.Fatal("failed profile lookup did not release the generation slot")
+			}
+		})
 	}
 }
 
