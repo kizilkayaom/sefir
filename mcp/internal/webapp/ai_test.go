@@ -184,6 +184,187 @@ func TestGenerationUsesSelectedPreset(t *testing.T) {
 	}
 }
 
+func TestGenerationUsesCustomWritingProfile(t *testing.T) {
+	server, store, bridge, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	accountID := server.sessions[cookie.Value].AccountID
+	const profileID = "22222222-2222-4222-8222-222222222222"
+	store.writingStyle = WritingStyleProfile{
+		ProfileID:     profileID,
+		Name:          "Direct introduction",
+		Language:      "en",
+		Content:       "Use short sentences and a friendly greeting.",
+		FormatVersion: 1,
+		Revision:      3,
+	}
+	bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body","preset_id":"custom:` + profileID + `","preset_revision":3}`)
+	body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","provider":"anthropic","profile_id":"` + profileID + `"}`
+	response := request(server, "POST", "/api/drafts", body, cookie, csrf)
+	if response.Code != 201 {
+		t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+	}
+	if store.writingStyleLookupCalls != 1 || store.writingStyleLookupID != profileID || store.writingStyleLookupAccountID != accountID {
+		t.Fatalf("wrong storage request: account=%s profile=%s calls=%d", store.writingStyleLookupAccountID, store.writingStyleLookupID, store.writingStyleLookupCalls)
+	}
+	if len(bridge.calls) != 1 || bridge.calls[0] != "generate" || len(bridge.payloads) != 1 {
+		t.Fatal("draft generation was not called exactly once")
+	}
+	payload, ok := bridge.payloads[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected bridge payload type: %T", bridge.payloads[0])
+	}
+	if _, exists := payload["preset_id"]; exists {
+		t.Fatal("custom profile generation included a built-in preset")
+	}
+	if payload["provider"] != "anthropic" || payload["cv_text"] != "Fictional test resume" {
+		t.Fatal("selected provider or resume was not forwarded")
+	}
+	profile, ok := payload["custom_profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected custom profile type: %T", payload["custom_profile"])
+	}
+	expectedProfile := map[string]any{
+		"profile_id": profileID,
+		"revision":   3,
+		"name":       store.writingStyle.Name,
+		"language":   store.writingStyle.Language,
+		"content":    store.writingStyle.Content,
+	}
+	if len(profile) != len(expectedProfile) {
+		t.Fatalf("custom profile field count: got %d, want %d", len(profile), len(expectedProfile))
+	}
+	for field, want := range expectedProfile {
+		if got := profile[field]; got != want {
+			t.Fatalf("forwarded profile %s: got %v, want %v", field, got, want)
+		}
+	}
+	if store.draftInput.ContactID != testID || store.draftInput.Subject != "Hello" || store.draftInput.Body != "Test body" {
+		t.Fatal("generated draft was not saved")
+	}
+	if store.draftInput.PresetID == nil || *store.draftInput.PresetID != "custom:"+profileID ||
+		store.draftInput.PresetRevision == nil || *store.draftInput.PresetRevision != 3 {
+		t.Fatal("generated draft lost its custom writing profile metadata")
+	}
+}
+
+func TestGenerationRejectsInvalidProfileSelection(t *testing.T) {
+	const profileID = "22222222-2222-4222-8222-222222222222"
+	for _, test := range []struct {
+		name    string
+		extra   string
+		status  int
+		message string
+	}{
+		{
+			name:    "conflicting selections",
+			extra:   `,"profile_id":"` + profileID + `","preset_id":"formal"`,
+			status:  422,
+			message: "Choose either a tone preset or a custom writing profile",
+		},
+		{
+			name:    "invalid UUID",
+			extra:   `,"profile_id":"invalid"`,
+			status:  422,
+			message: "A writing profile UUID is required",
+		},
+		{
+			name:    "whitespace ID",
+			extra:   `,"profile_id":" "`,
+			status:  422,
+			message: "A writing profile UUID is required",
+		},
+		{
+			name:    "wrong type",
+			extra:   `,"profile_id":123`,
+			status:  400,
+			message: "Invalid request body",
+		},
+		{
+			name:    "client-supplied profile content",
+			extra:   `,"profile_id":"` + profileID + `","custom_profile":{}`,
+			status:  400,
+			message: "Invalid request body",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, store, bridge, _ := fixture(t)
+			cookie, csrf := login(t, server)
+			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume"` + test.extra + `}`
+			response := request(server, "POST", "/api/drafts", body, cookie, csrf)
+			if response.Code != test.status {
+				t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+			}
+			var result struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Error != test.message {
+				t.Fatalf("unexpected error: got %q, want %q", result.Error, test.message)
+			}
+			if store.writingStyleLookupCalls != 0 || len(bridge.calls) != 0 ||
+				store.draftInput != (catalogue.CreateDraftInput{}) {
+				t.Fatal("invalid profile selection reached storage or generation")
+			}
+		})
+	}
+}
+
+func TestGenerationRejectsInvalidCustomProfileMetadata(t *testing.T) {
+	const profileID = "22222222-2222-4222-8222-222222222222"
+	for _, test := range []struct {
+		name  string
+		extra string
+	}{
+		{name: "different profile", extra: `,"preset_id":"custom:` + testID + `","preset_revision":3`},
+		{name: "built-in preset", extra: `,"preset_id":"formal","preset_revision":3`},
+		{name: "older revision", extra: `,"preset_id":"custom:` + profileID + `","preset_revision":2`},
+		{name: "newer revision", extra: `,"preset_id":"custom:` + profileID + `","preset_revision":4`},
+		{name: "missing metadata"},
+		{name: "missing revision", extra: `,"preset_id":"custom:` + profileID + `"`},
+		{name: "zero revision", extra: `,"preset_id":"custom:` + profileID + `","preset_revision":0`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, store, bridge, _ := fixture(t)
+			cookie, csrf := login(t, server)
+			accountID := server.sessions[cookie.Value].AccountID
+			store.writingStyle = WritingStyleProfile{
+				ProfileID:     profileID,
+				Name:          "Direct introduction",
+				Language:      "en",
+				Content:       "Use short sentences and a friendly greeting.",
+				FormatVersion: 1,
+				Revision:      3,
+			}
+			bridge.result = json.RawMessage(`{"subject":"Hello","body":"Test body"` + test.extra + `}`)
+			body := `{"contact_id":"` + testID + `","cv_text":"Fictional test resume","provider":"anthropic","profile_id":"` + profileID + `"}`
+			response := request(server, "POST", "/api/drafts", body, cookie, csrf)
+			if response.Code != 502 {
+				t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+			}
+			var result struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Error != "The model returned an invalid draft" {
+				t.Fatalf("unexpected error: %q", result.Error)
+			}
+			if store.writingStyleLookupCalls != 1 || store.writingStyleLookupID != profileID || store.writingStyleLookupAccountID != accountID {
+				t.Fatalf("wrong storage request: account=%s profile=%s calls=%d", store.writingStyleLookupAccountID, store.writingStyleLookupID, store.writingStyleLookupCalls)
+			}
+			if len(bridge.calls) != 1 || bridge.calls[0] != "generate" {
+				t.Fatal("draft generation was not called exactly once")
+			}
+			if store.draftInput != (catalogue.CreateDraftInput{}) {
+				t.Fatal("invalid custom profile metadata reached draft storage")
+			}
+		})
+	}
+}
+
 func TestGenerationRejectsInvalidPresetMetadata(t *testing.T) {
 	for _, test := range []struct {
 		name  string

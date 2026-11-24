@@ -110,6 +110,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		CVText    string `json:"cv_text"`
 		Provider  string `json:"provider"`
 		PresetID  string `json:"preset_id"`
+		ProfileID string `json:"profile_id"`
 	}
 	if !decode(w, r, &input) {
 		return
@@ -124,14 +125,25 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnprocessableEntity, "Choose a supported AI provider")
 		return
 	}
-	if input.PresetID == "" {
-		input.PresetID = contextAccount(r.Context()).DefaultPresetID
-	}
-	switch input.PresetID {
-	case "prof", "warm_prof", "technical", "formal":
-	default:
-		fail(w, http.StatusUnprocessableEntity, "Choose a supported writing style")
+	if input.ProfileID != "" && input.PresetID != "" {
+		fail(w, http.StatusUnprocessableEntity, "Choose either a tone preset or a custom writing profile")
 		return
+	}
+	if input.ProfileID != "" {
+		if !uuidPattern.MatchString(input.ProfileID) {
+			fail(w, http.StatusUnprocessableEntity, "A writing profile UUID is required")
+			return
+		}
+	} else {
+		if input.PresetID == "" {
+			input.PresetID = contextAccount(r.Context()).DefaultPresetID
+		}
+		switch input.PresetID {
+		case "prof", "warm_prof", "technical", "formal":
+		default:
+			fail(w, http.StatusUnprocessableEntity, "Choose a supported writing style")
+			return
+		}
 	}
 	select {
 	case s.generating <- struct{}{}:
@@ -151,10 +163,30 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnprocessableEntity, "Add the contact's name before generating a draft")
 		return
 	}
-	result, err := s.bridge.Call(ctx, "generate", map[string]any{
+	payload := map[string]any{
 		"contact": contact, "cv_text": input.CVText, "provider": input.Provider,
-		"preset_id": input.PresetID,
-	})
+	}
+	expectedPresetID := input.PresetID
+	expectedRevision := 0
+	if input.ProfileID == "" {
+		payload["preset_id"] = input.PresetID
+	} else {
+		profile, err := s.store.WritingStyle(ctx, input.ProfileID)
+		if err != nil {
+			storeError(w, err)
+			return
+		}
+		payload["custom_profile"] = map[string]any{
+			"profile_id": profile.ProfileID,
+			"revision":   profile.Revision,
+			"name":       profile.Name,
+			"language":   profile.Language,
+			"content":    profile.Content,
+		}
+		expectedPresetID = "custom:" + profile.ProfileID
+		expectedRevision = profile.Revision
+	}
+	result, err := s.bridge.Call(ctx, "generate", payload)
 	if err != nil {
 		fail(w, http.StatusBadGateway, "Draft generation failed. Check the selected AI provider's key, model access, and usage limits, then try again.")
 		return
@@ -174,7 +206,9 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnprocessableEntity, "The selected AI provider is not configured. Check the server's API key and model settings.")
 		return
 	}
-	if generated.PresetID != input.PresetID || generated.PresetRevision < 1 || generated.PresetRevision > 2147483647 {
+	if generated.PresetID != expectedPresetID || generated.PresetRevision < 1 ||
+		generated.PresetRevision > 2147483647 ||
+		(input.ProfileID != "" && generated.PresetRevision != expectedRevision) {
 		fail(w, http.StatusBadGateway, "The model returned an invalid draft")
 		return
 	}
