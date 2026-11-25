@@ -490,6 +490,36 @@ test('contact changes and draft generation use the API', async ({ page }) => {
   expect(state.approvalRequests).toHaveLength(0)
 })
 
+test('draft generation uses the selected custom writing profile', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  await page.goto('/#new')
+  await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+  await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
+  await expect(page.getByLabel('AI provider')).toHaveValue('cohere')
+  await page.getByLabel('Writing style', { exact: true }).selectOption('custom')
+  const picker = page.getByLabel('Custom writing profile', { exact: true })
+  const generate = page.getByRole('button', { name: 'Generate draft', exact: true })
+  await expect(picker).toBeEnabled()
+  await expect(picker).toHaveValue('')
+  await expect(generate).toBeDisabled()
+  await page.locator('form').dispatchEvent('submit')
+  expect(state.generationRequests).toHaveLength(0)
+  await picker.selectOption(writingProfile.profile_id)
+  await expect(picker).toHaveValue(writingProfile.profile_id)
+  await expect(generate).toBeEnabled()
+  await expect(page.getByText("Generating this draft sends your résumé text, selected contact's details, and selected writing profile to Cohere.", { exact: true })).toBeVisible()
+  await generate.click()
+  await expect(page.getByRole('heading', { name: draft.subject })).toBeVisible()
+  expect(state.generationRequests).toEqual([{
+    contact_id: contact.id,
+    cv_text: 'Fictional resume for automated testing.',
+    provider: 'cohere',
+    profile_id: writingProfile.profile_id,
+  }])
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
 for (const provider of ['anthropic', 'openai', 'openrouter']) {
   test(`draft generation uses the selected ${provider} provider`, async ({ page }) => {
     const state = await mockAPI(page)

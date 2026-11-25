@@ -4,12 +4,13 @@ import type { FormEvent } from 'react'
 import { PageControls } from '@/components/page-controls'
 import { EmailEditor } from '@/components/email-editor'
 import { Button } from '@/components/ui/button'
+import { WritingProfilePicker } from '@/components/writing-profile-picker'
 import { useResource } from '@/hooks/use-resource'
 import { useUnsavedChanges } from '@/hooks/use-unsaved-changes'
 import { api, errorMessage } from '@/lib/api'
 import { emailFits } from '@/lib/email-content'
 import type { EmailContent } from '@/lib/email-content'
-import type { AccountStatus, AISettings, Contact, Page } from '@/types/api'
+import type { AccountStatus, AISettings, Contact, Page, WritingStyleProfile } from '@/types/api'
 import type { Draft } from '@/types/draft'
 
 export function GeneratePage({ contact, onCreated }: { contact: Contact | null, onCreated: (draft: Draft) => void }) {
@@ -19,8 +20,11 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
   const ai = useResource<AISettings>('/api/settings/ai')
   const account = useResource<AccountStatus>('/api/settings/account')
   const [provider, setProvider] = useState('')
-  const [presetOverride, setPresetOverride] = useState('')
-  const presetID = presetOverride || account.data?.default_preset_id || ''
+  const [styleOverride, setStyleOverride] = useState('')
+  const [customProfile, setCustomProfile] = useState<WritingStyleProfile | null>(null)
+  const styleID = styleOverride || account.data?.default_preset_id || ''
+  const usingCustomProfile = styleID === 'custom'
+  const missingCustomProfile = usingCustomProfile && !customProfile
   const providerID = provider || ai.data?.default_provider || ''
   const selectedProvider = ai.data?.providers.find((item) => item.id === providerID)
   const [cv, setCV] = useState('')
@@ -35,14 +39,21 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
 
   async function generate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!selected || busy || (mode === 'generate' && (!selectedProvider || !account.data))) return
+    if (!selected || busy || (mode === 'generate' && (!selectedProvider || !account.data || missingCustomProfile))) return
     setBusy(true)
     setError('')
     try {
       const draft = await api<Draft>(mode === 'generate' ? '/api/drafts' : '/api/drafts/manual', {
         method: 'POST',
         body: JSON.stringify(mode === 'generate'
-          ? { contact_id: selected.id, cv_text: cv, provider: selectedProvider?.id, preset_id: presetID }
+          ? {
+            contact_id: selected.id,
+            cv_text: cv,
+            provider: selectedProvider?.id,
+            ...(usingCustomProfile
+              ? { profile_id: customProfile?.profile_id }
+              : { preset_id: styleID }),
+          }
           : { contact_id: selected.id, subject, body: content.text, body_html: content.html }),
       })
       setCV('')
@@ -86,19 +97,40 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
                 {ai.data.providers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select>
               {selectedProvider && <p className="mt-2 break-words text-sm text-muted-foreground">Model: {selectedProvider.model}</p>}
-              <p id="provider-data-notice" className="mt-2 text-sm leading-6 text-muted-foreground">{selectedProvider ? `Generating this draft sends your résumé text and selected contact's details to ${selectedProvider.name}.` : 'Choose which provider receives your résumé text and contact details.'}</p>
+              <p id="provider-data-notice" className="mt-2 text-sm leading-6 text-muted-foreground">
+                {selectedProvider
+                  ? usingCustomProfile
+                    ? `Generating this draft sends your résumé text, selected contact's details, and selected writing profile to ${selectedProvider.name}.`
+                    : `Generating this draft sends your résumé text and selected contact's details to ${selectedProvider.name}.`
+                  : usingCustomProfile
+                    ? 'Choose which provider receives your résumé text, contact details, and writing profile.'
+                    : 'Choose which provider receives your résumé text and contact details.'}
+              </p>
               {selectedProvider?.id === 'openrouter' && <p className="mt-2 text-sm leading-6 text-muted-foreground">OpenRouter forwards this information to the provider serving your selected model.</p>}
             </div>}
             {account.loading && <p role="status">Loading writing style…</p>}
             {account.error && <div className="space-y-2"><p role="alert" className="text-destructive">{account.error}</p><Button type="button" variant="outline" disabled={busy} onClick={account.reload}>Retry writing style</Button></div>}
             {account.data && <div>
               <label htmlFor="draft-preset" className="block text-sm font-medium">Writing style</label>
-              <select id="draft-preset" className="field mt-2" required disabled={busy} value={presetID} onChange={(event) => { setPresetOverride(event.target.value); setError('') }}>
+              <select id="draft-preset" className="field mt-2" required disabled={busy} value={styleID} onChange={(event) => { setStyleOverride(event.target.value); setError('') }}>
                 <option value="prof">Concise professional</option>
                 <option value="warm_prof">Warm professional</option>
                 <option value="technical">Technical and direct</option>
                 <option value="formal">Formal</option>
+                <option value="custom">Custom writing profile</option>
               </select>
+              {usingCustomProfile && (
+                <div className="mt-3">
+                  <WritingProfilePicker
+                    selected={customProfile}
+                    disabled={busy}
+                    onChange={(profile) => {
+                      setCustomProfile(profile)
+                      setError('')
+                    }}
+                  />
+                </div>
+              )}
             </div>}
             <label className="block text-sm font-medium">Résumé text
               <textarea className="field mt-2 min-h-64" required maxLength={100000} disabled={busy} value={cv} onChange={(event) => setCV(event.target.value)} placeholder="Paste your résumé as plain text." />
@@ -115,7 +147,7 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
         )}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {busy && <p role="status" className="text-sm">{mode === 'generate' ? 'Generating your draft. This may take a minute.' : 'Saving your draft…'}</p>}
-        <Button type="submit" disabled={busy || !selected || (mode === 'generate' ? !cv.trim() || !selectedProvider || !account.data : !subject.trim() || !emailFits(content))}>
+        <Button type="submit" disabled={busy || !selected || (mode === 'generate' ? !cv.trim() || !selectedProvider || !account.data || missingCustomProfile : !subject.trim() || !emailFits(content))}>
           {mode === 'generate' ? (busy ? 'Generating…' : 'Generate draft') : (busy ? 'Saving…' : 'Save draft')}
         </Button>
       </form>
