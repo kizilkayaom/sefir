@@ -9,3 +9,7 @@ class EmailDraft(BaseModel):
         str_strip_whitespace=True,
         extra="forbid",
     )
+
+
+class PolishedEmail(EmailDraft):
+    body_html: str = ""
