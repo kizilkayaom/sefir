@@ -106,6 +106,7 @@ async function mockAPI(page: Page) {
     generated: false,
     generationRequests: [] as Record<string, string>[],
     generationError: false,
+    generationWait: null as Promise<void> | null,
     providerError: false,
     aiOperator: false,
     providerSaveError: false,
@@ -287,6 +288,7 @@ async function mockAPI(page: Page) {
       expect(request.postDataJSON().contact_id).toBe(contact.id)
       expect(request.postDataJSON().cv_text).toContain('Fictional resume')
       state.generationRequests.push(request.postDataJSON())
+      if (state.generationWait) await state.generationWait
       if (state.generationError) return reply({ error: 'Draft generation failed. Check the selected AI provider.' }, 502)
       state.generated = true
       return reply(draft, 201)
@@ -517,6 +519,224 @@ test('draft generation uses the selected custom writing profile', async ({ page 
     provider: 'cohere',
     profile_id: writingProfile.profile_id,
   }])
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('draft generation switches from a custom writing profile to a built-in preset', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.defaultPreset = 'warm_prof'
+  state.writingProfiles = [writingProfile]
+  await page.goto('/#new')
+  await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+  await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
+  const style = page.getByLabel('Writing style', { exact: true })
+  await expect(style).toHaveValue('warm_prof')
+  await style.selectOption('custom')
+  await page.getByLabel('Custom writing profile', { exact: true }).selectOption(writingProfile.profile_id)
+  await style.selectOption('formal')
+  await expect(page.getByLabel('Custom writing profile', { exact: true })).toHaveCount(0)
+  await expect(page.getByText("Generating this draft sends your résumé text and selected contact's details to Cohere.", { exact: true })).toBeVisible()
+  expect(state.generationRequests).toHaveLength(0)
+  await page.getByRole('button', { name: 'Generate draft', exact: true }).click()
+  await expect(page.getByRole('heading', { name: draft.subject })).toBeVisible()
+  expect(state.generationRequests).toEqual([{
+    contact_id: contact.id,
+    cv_text: 'Fictional resume for automated testing.',
+    provider: 'cohere',
+    preset_id: 'formal',
+  }])
+  expect(state.defaultPreset).toBe('warm_prof')
+  expect(state.presetRequests).toHaveLength(0)
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('draft generation keeps a custom writing profile selected across pages and refreshes', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = Array.from({ length: 26 }, (_, index) => ({
+    ...writingProfile,
+    profile_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}`,
+    name: `Writing profile ${index + 1}`,
+  }))
+  const firstProfile = state.writingProfiles[0]
+  const lastProfile = state.writingProfiles[25]
+  await page.goto('/#new')
+  await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+  await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
+  await page.getByLabel('Writing style', { exact: true }).selectOption('custom')
+  const picker = page.getByLabel('Custom writing profile', { exact: true })
+  const previous = page.getByRole('button', { name: 'Previous', exact: true }).last()
+  const next = page.getByRole('button', { name: 'Next', exact: true }).last()
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true }).last()
+  await expect(picker.locator('option')).toHaveCount(26)
+  await picker.selectOption(firstProfile.profile_id)
+  await expect(previous).toBeDisabled()
+  await next.click()
+  await expect(picker.locator('option')).toHaveCount(3)
+  await expect(picker).toHaveValue(firstProfile.profile_id)
+  await expect(picker.locator('option:checked')).toHaveText(`${firstProfile.name} — en`)
+  await expect(previous).toBeEnabled()
+  await expect(next).toBeDisabled()
+  state.writingProfiles[25] = { ...lastProfile, name: 'Refreshed writing profile' }
+  await refresh.click()
+  await expect(picker.getByRole('option', { name: 'Refreshed writing profile — en', exact: true })).toHaveCount(1)
+  await expect(picker).toHaveValue(firstProfile.profile_id)
+  await picker.selectOption(lastProfile.profile_id)
+  await previous.click()
+  await expect(picker.locator('option')).toHaveCount(27)
+  await expect(picker).toHaveValue(lastProfile.profile_id)
+  await expect(picker.locator('option:checked')).toHaveText('Refreshed writing profile — en')
+  expect(state.writingProfileRequests).toEqual([
+    { limit: 25, offset: 0 },
+    { limit: 25, offset: 25 },
+    { limit: 25, offset: 25 },
+    { limit: 25, offset: 0 },
+  ])
+  expect(state.generationRequests).toHaveLength(0)
+  await page.getByRole('button', { name: 'Generate draft', exact: true }).click()
+  await expect(page.getByRole('heading', { name: draft.subject })).toBeVisible()
+  expect(state.generationRequests).toEqual([{
+    contact_id: contact.id,
+    cv_text: 'Fictional resume for automated testing.',
+    provider: 'cohere',
+    profile_id: lastProfile.profile_id,
+  }])
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('draft generation handles custom writing profile loading, errors, retry, and empty results', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfilesError = true
+  let finishLoading!: () => void
+  state.writingProfilesWait = new Promise<void>((resolve) => { finishLoading = resolve })
+  await page.goto('/#new')
+  const picker = page.getByLabel('Custom writing profile', { exact: true })
+  const generate = page.getByRole('button', { name: 'Generate draft', exact: true })
+  try {
+    await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+    await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
+    await expect(page.getByLabel('AI provider')).toHaveValue('cohere')
+    await page.getByLabel('Writing style', { exact: true }).selectOption('custom')
+    await expect(page.getByText('Loading writing profiles…', { exact: true })).toBeVisible()
+    await expect(page.getByText('No custom writing profiles yet.', { exact: true })).toHaveCount(0)
+    await expect(picker).toBeDisabled()
+    await expect(generate).toBeDisabled()
+    for (const name of ['Previous', 'Next', 'Refresh']) {
+      await expect(page.getByRole('button', { name, exact: true }).last()).toBeDisabled()
+    }
+    await page.locator('form').dispatchEvent('submit')
+    expect(state.generationRequests).toHaveLength(0)
+  } finally {
+    state.writingProfilesWait = null
+    finishLoading()
+  }
+  await expect(page.getByRole('alert')).toContainText('Could not load writing profiles.')
+  await expect(page.getByText('Loading writing profiles…', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('No custom writing profiles yet.', { exact: true })).toHaveCount(0)
+  await expect(picker).toBeDisabled()
+  await expect(generate).toBeDisabled()
+  state.writingProfilesError = false
+  await page.getByRole('button', { name: 'Retry writing profiles', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByText('No custom writing profiles yet.', { exact: true })).toBeVisible()
+  await expect(picker.locator('option')).toHaveCount(1)
+  await expect(picker).toHaveValue('')
+  await expect(generate).toBeDisabled()
+  await page.locator('form').dispatchEvent('submit')
+  expect(state.generationRequests).toHaveLength(0)
+  state.writingProfiles = [writingProfile]
+  await page.getByRole('button', { name: 'Refresh', exact: true }).last().click()
+  await expect(picker.locator('option')).toHaveCount(2)
+  await expect(page.getByText('No custom writing profiles yet.', { exact: true })).toHaveCount(0)
+  await expect(picker).toHaveValue('')
+  await expect(generate).toBeDisabled()
+  await picker.selectOption(writingProfile.profile_id)
+  await expect(generate).toBeEnabled()
+  await generate.click()
+  await expect(page.getByRole('heading', { name: draft.subject })).toBeVisible()
+  expect(state.generationRequests).toEqual([{
+    contact_id: contact.id,
+    cv_text: 'Fictional resume for automated testing.',
+    provider: 'cohere',
+    profile_id: writingProfile.profile_id,
+  }])
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('draft generation preserves a custom writing profile after failure and locks controls while pending', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  state.generationError = true
+  let finishGeneration!: () => void
+  state.generationWait = new Promise<void>((resolve) => { finishGeneration = resolve })
+  await page.goto('/#new')
+  const picker = page.getByLabel('Custom writing profile', { exact: true })
+  try {
+    await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+    await page.getByLabel('AI provider').selectOption('anthropic')
+    await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
+    await page.getByLabel('Writing style', { exact: true }).selectOption('custom')
+    await picker.selectOption(writingProfile.profile_id)
+    await page.getByRole('button', { name: 'Generate draft', exact: true }).click()
+    await expect.poll(() => state.generationRequests.length).toBe(1)
+    await expect(page.getByText('Generating your draft. This may take a minute.', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Generating…', exact: true })).toBeDisabled()
+    await expect(page.locator('form').locator('input:enabled, select:enabled, textarea:enabled, button:enabled')).toHaveCount(0)
+    await page.locator('form').dispatchEvent('submit')
+    expect(state.generationRequests).toHaveLength(1)
+  } finally {
+    state.generationWait = null
+    finishGeneration()
+  }
+  await expect(page.getByRole('alert')).toHaveText('Draft generation failed. Check the selected AI provider.')
+  await expect(page.getByLabel('Contact', { exact: true })).toHaveValue(contact.id)
+  await expect(page.getByLabel('AI provider')).toHaveValue('anthropic')
+  await expect(page.getByLabel('Writing style', { exact: true })).toHaveValue('custom')
+  await expect(picker).toHaveValue(writingProfile.profile_id)
+  await expect(picker).toBeEnabled()
+  await expect(page.getByLabel('Résumé text')).toHaveValue('Fictional resume for automated testing.')
+  const expectedRequest = {
+    contact_id: contact.id,
+    cv_text: 'Fictional resume for automated testing.',
+    provider: 'anthropic',
+    profile_id: writingProfile.profile_id,
+  }
+  expect(state.generationRequests).toEqual([expectedRequest])
+  state.generationError = false
+  await page.getByRole('button', { name: 'Generate draft', exact: true }).click()
+  await expect(page.getByRole('heading', { name: draft.subject })).toBeVisible()
+  expect(state.generationRequests).toEqual([expectedRequest, expectedRequest])
+  expect(state.presetRequests).toHaveLength(0)
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('manual drafting works without selecting a custom writing profile', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  await page.goto('/#new')
+  await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+  await page.getByLabel('Résumé text').fill('Fictional resume for automated testing.')
+  await expect(page.getByLabel('AI provider')).toHaveValue('cohere')
+  await page.getByLabel('Writing style', { exact: true }).selectOption('custom')
+  const picker = page.getByLabel('Custom writing profile', { exact: true })
+  await expect(picker).toBeEnabled()
+  await expect(picker).toHaveValue('')
+  await expect(page.getByRole('button', { name: 'Generate draft', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'Write yourself', exact: true }).click()
+  await expect(picker).toHaveCount(0)
+  await expect(page.getByLabel('Writing style', { exact: true })).toHaveCount(0)
+  await page.getByLabel('Subject', { exact: true }).fill('A manual draft')
+  await page.getByRole('textbox', { name: 'Email body' }).fill('A fictional introduction.')
+  await page.getByRole('button', { name: 'Save draft', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'A manual draft' })).toBeVisible()
+  expect(state.manualRequest).toMatchObject({
+    contact_id: contact.id,
+    subject: 'A manual draft',
+    body: 'A fictional introduction.',
+  })
+  expect(state.manualRequest).not.toHaveProperty('preset_id')
+  expect(state.manualRequest).not.toHaveProperty('profile_id')
+  expect(state.manualRequest).not.toHaveProperty('custom_profile')
+  expect(state.generationRequests).toHaveLength(0)
   expect(state.approvalRequests).toHaveLength(0)
 })
 
