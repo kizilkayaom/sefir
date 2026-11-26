@@ -115,6 +115,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/drafts", s.protect(s.handleGenerate))
 	mux.HandleFunc("POST /api/drafts/manual", s.protect(s.handleCompose))
 	mux.HandleFunc("POST /api/drafts/{id}/versions/{version}/edit", s.protect(s.handleEditDraft))
+	mux.HandleFunc("POST /api/drafts/{id}/versions/{version}/polish", s.protect(s.handlePolishDraft))
 	mux.HandleFunc("GET /api/drafts/{id}/versions/{version}", s.protect(s.handleDraft))
 	mux.HandleFunc("POST /api/drafts/{id}/versions/{version}/approve", s.protect(s.handleApprove))
 	mux.HandleFunc("GET /api/drafts/{id}/versions/{version}/status", s.protect(s.handleStatus))

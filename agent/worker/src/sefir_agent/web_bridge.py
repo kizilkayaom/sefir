@@ -124,6 +124,38 @@ async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
             "preset_id": style_id,
             "preset_revision": style_revision,
         }
+    if action == "polish":
+        from sefir_agent.polishing import polish_email
+        from sefir_agent.schemas import PolishedEmail
+
+        original = PolishedEmail.model_validate(payload["draft"])
+        raw_profile = payload.get("custom_profile")
+        if raw_profile is None:
+            preset = get_tone_preset(payload.get("preset_id"))
+            style_arguments = {"preset_id": preset.id}
+            style_id, style_revision = preset.id, preset.revision
+        else:
+            if payload.get("preset_id") is not None:
+                raise ValueError(
+                    "Choose either a tone preset or a custom writing profile"
+                )
+            custom_profile = parse_custom_profile(raw_profile)
+            style_arguments = {"custom_profile": custom_profile}
+            style_id = f"custom:{custom_profile.profile_id}"
+            style_revision = custom_profile.revision
+        try:
+            polished = await polish_email(
+                original,
+                provider_id=payload.get("provider"),
+                **style_arguments,
+            )
+        except ProviderConfigurationError:
+            return {"error": "provider_unavailable"}
+        return {
+            **polished.model_dump(),
+            "preset_id": style_id,
+            "preset_revision": style_revision,
+        }
     if action not in {
         "approve",
         "status",

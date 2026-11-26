@@ -20,6 +20,11 @@ const testPassword = "letter1!"
 
 type fakeStore struct {
 	draft                       catalogue.Draft
+	draftLookupID               string
+	draftLookupVersion          int
+	draftLookupAccountID        string
+	draftLookupCalls            int
+	draftLookupDeadline         time.Time
 	err                         error
 	activity                    *Activity
 	saved                       ContactInput
@@ -59,7 +64,11 @@ func (f *fakeStore) Drafts(_ context.Context, limit, offset int) ([]catalogue.Dr
 	f.limit, f.offset = limit, offset
 	return []catalogue.Draft{f.draft, f.draft}, f.err
 }
-func (f *fakeStore) Draft(context.Context, string, int) (catalogue.Draft, error) {
+func (f *fakeStore) Draft(ctx context.Context, id string, version int) (catalogue.Draft, error) {
+	f.draftLookupID, f.draftLookupVersion = id, version
+	f.draftLookupAccountID = contextAccount(ctx).ID
+	f.draftLookupCalls++
+	f.draftLookupDeadline, _ = ctx.Deadline()
 	return f.draft, f.err
 }
 func (f *fakeStore) Contacts(context.Context, int, int) ([]Contact, error) { return nil, f.err }

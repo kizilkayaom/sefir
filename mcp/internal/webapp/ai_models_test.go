@@ -34,7 +34,7 @@ func TestAIModelDiscoveryDiscardsResultsWhenKeyChangesDuringFetch(t *testing.T) 
 	}
 }
 
-func TestAIModelDiscoveryProcessUsesSavedKeyAndDisablesDotenv(t *testing.T) {
+func TestAIProcessesUseSavedConfiguration(t *testing.T) {
 	configuration := aiConfigFixture(t)
 	t.Setenv("OPENAI_API_KEY", "environment-test-key")
 	if err := configuration.UpdateProvider("openai", "saved-test-key", "gpt-6-luna"); err != nil {
@@ -46,9 +46,16 @@ func TestAIModelDiscoveryProcessUsesSavedKeyAndDisablesDotenv(t *testing.T) {
 		t.Fatal(err)
 	}
 	bridge := PythonBridge{Python: script, Root: root, AI: configuration}
-	result, err := bridge.Call(context.Background(), "models", map[string]string{"provider": "openai"})
-	if err != nil || string(result) != `{"key":"saved-test-key","dotenv":"1"}` {
-		t.Fatal("model-discovery process did not receive the effective saved configuration")
+	for _, action := range []string{"generate", "providers", "models", "polish"} {
+		t.Run(action, func(t *testing.T) {
+			result, err := bridge.Call(context.Background(), action, map[string]string{"provider": "openai"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(result) != `{"key":"saved-test-key","dotenv":"1"}` {
+				t.Fatal("AI process did not receive the effective saved configuration")
+			}
+		})
 	}
 }
 

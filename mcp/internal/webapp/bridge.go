@@ -26,7 +26,7 @@ func (b PythonBridge) Call(ctx context.Context, action string, payload any) (jso
 	}
 	command := exec.CommandContext(ctx, b.Python, "-m", "sefir_agent.web_bridge")
 	command.Dir = b.Root
-	if b.AI != nil && (action == "generate" || action == "providers" || action == "models") {
+	if b.AI != nil && (action == "generate" || action == "polish" || action == "providers" || action == "models") {
 		command.Env, err = b.AI.Environment(os.Environ())
 		if err != nil {
 			return nil, errors.New("AI configuration is unavailable")
