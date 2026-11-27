@@ -2,7 +2,10 @@ import importlib
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+from pydantic import ValidationError
 
 from sefir_agent.schemas import PolishedEmail
 
@@ -118,6 +121,107 @@ class PolishingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(polished.model_dump(), self.suggestion)
                 self.assertEqual(self.draft.model_dump(), original)
                 self.completion.assert_awaited_once()
+
+    async def test_invalid_model_output_is_rejected(self) -> None:
+        for content in (
+            "Not JSON",
+            json.dumps({"body": "Hi Alex.", "body_html": ""}),
+            json.dumps({**self.suggestion, "body": " \n\t "}),
+            json.dumps({**self.suggestion, "recipient": "other@example.com"}),
+            json.dumps({**self.suggestion, "body_html": 42}),
+        ):
+            with self.subTest(content=content):
+                original = self.draft.model_dump()
+                self.completion.reset_mock()
+                self.completion.return_value = self.response(content)
+
+                with self.assertRaisesRegex(
+                    RuntimeError, "^Agent returned an invalid polished email$"
+                ) as raised:
+                    await self.polishing.polish_email(self.draft, provider_id="cohere")
+
+                self.assertIsInstance(raised.exception.__cause__, ValidationError)
+                self.assertEqual(self.draft.model_dump(), original)
+                self.completion.assert_awaited_once()
+
+    async def test_empty_model_response_is_rejected(self) -> None:
+        for content in ("", " \n\t "):
+            with self.subTest(content=content):
+                original = self.draft.model_dump()
+                self.completion.reset_mock()
+                self.completion.return_value = self.response(content)
+
+                with self.assertRaisesRegex(RuntimeError, "^Email polishing failed$"):
+                    await self.polishing.polish_email(self.draft, provider_id="cohere")
+
+                self.assertEqual(self.draft.model_dump(), original)
+                self.completion.assert_awaited_once()
+
+        for content in (None, "", " \n\t "):
+            with self.subTest(event_content=content):
+                original = self.draft.model_dump()
+                self.completion.reset_mock()
+
+                async def events(content=content, **kwargs):
+                    if content is not None:
+                        yield SimpleNamespace(
+                            error_code=None,
+                            is_final_response=lambda: True,
+                            content=SimpleNamespace(
+                                parts=[SimpleNamespace(text=content, thought=False)]
+                            ),
+                        )
+
+                with (
+                    patch.object(
+                        self.polishing.InMemoryRunner, "run_async", side_effect=events
+                    ) as run,
+                    self.assertRaisesRegex(
+                        RuntimeError, "^Agent returned no polished email$"
+                    ),
+                ):
+                    await self.polishing.polish_email(self.draft, provider_id="cohere")
+
+                self.assertEqual(self.draft.model_dump(), original)
+                run.assert_called_once()
+                self.completion.assert_not_awaited()
+
+    async def test_provider_failure_does_not_try_another_provider(self) -> None:
+        original = self.draft.model_dump()
+        error = RuntimeError("Mock provider unavailable")
+        self.completion.side_effect = error
+
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "openai-test-key"}),
+            self.assertRaisesRegex(RuntimeError, "^Email polishing failed$") as raised,
+        ):
+            await self.polishing.polish_email(self.draft, provider_id="cohere")
+
+        self.assertNotIn(str(error), str(raised.exception))
+        self.assertEqual(self.draft.model_dump(), original)
+        self.completion.assert_awaited_once()
+
+    async def test_agent_error_event_hides_private_details(self) -> None:
+        original = self.draft.model_dump()
+        private_details = "Fictional private provider details"
+
+        async def events(**kwargs):
+            yield SimpleNamespace(
+                error_code="mock_provider_error", error_message=private_details
+            )
+
+        with (
+            patch.object(
+                self.polishing.InMemoryRunner, "run_async", side_effect=events
+            ) as run,
+            self.assertRaisesRegex(RuntimeError, "^Email polishing failed$") as raised,
+        ):
+            await self.polishing.polish_email(self.draft, provider_id="cohere")
+
+        self.assertNotIn(private_details, str(raised.exception))
+        self.assertEqual(self.draft.model_dump(), original)
+        run.assert_called_once()
+        self.completion.assert_not_awaited()
 
     async def test_changed_html_structure_or_links_are_rejected(self) -> None:
         for name, body_html, suggested_html in (

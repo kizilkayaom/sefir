@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import unittest
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+from pydantic import ValidationError
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.history.v1 import (
     HistoryEvent,
@@ -22,6 +24,7 @@ from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from sefir_agent.providers import ProviderConfigurationError
+from sefir_agent.schemas import PolishedEmail
 from sefir_agent.styles import PRESETS, CustomWritingProfile
 from sefir_agent.web_bridge import dispatch
 
@@ -1027,6 +1030,16 @@ class WebBridgeTests(unittest.IsolatedAsyncioTestCase):
 
 class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self.polish_draft = {
+            "subject": "Introduction",
+            "body": "Hello Alex. This is a fictional introduction.",
+            "body_html": "",
+        }
+        self.polish_suggestion = {
+            "subject": "A quick introduction",
+            "body": "Hi Alex. Here is a fictional introduction.",
+            "body_html": "",
+        }
         self.custom_profile = {
             "profile_id": "55555555-5555-4555-8555-555555555555",
             "revision": 3,
@@ -1289,3 +1302,250 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result, {"error": "provider_unavailable"})
         generate.assert_awaited_once()
+
+    async def test_polish_passes_builtin_styles_and_provider(self) -> None:
+        suggestion = {
+            **self.polish_suggestion,
+            "preset_id": "model-chosen",
+            "preset_revision": 99,
+        }
+        polish = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: suggestion))
+        with (
+            patch.dict(PRESETS, {"formal": replace(PRESETS["formal"], revision=2)}),
+            patch.dict(
+                sys.modules,
+                {"sefir_agent.polishing": SimpleNamespace(polish_email=polish)},
+            ),
+            patch(
+                "sefir_agent.web_bridge.Client.connect", new_callable=AsyncMock
+            ) as connect,
+        ):
+            for options, provider_id, preset_id, revision in (
+                ({}, None, "prof", 1),
+                ({"provider": "cohere"}, "cohere", "prof", 1),
+                (
+                    {"provider": "anthropic", "preset_id": "formal"},
+                    "anthropic",
+                    "formal",
+                    2,
+                ),
+                (
+                    {"provider": "openai", "preset_id": None, "custom_profile": None},
+                    "openai",
+                    "prof",
+                    1,
+                ),
+                (
+                    {
+                        "provider": "openrouter",
+                        "preset_id": "formal",
+                        "custom_profile": None,
+                    },
+                    "openrouter",
+                    "formal",
+                    2,
+                ),
+            ):
+                with self.subTest(options=options):
+                    polish.reset_mock()
+                    payload = {"draft": self.polish_draft, **options}
+                    original = deepcopy(payload)
+
+                    result = await dispatch("polish", payload)
+
+                    self.assertEqual(
+                        result,
+                        {
+                            **self.polish_suggestion,
+                            "preset_id": preset_id,
+                            "preset_revision": revision,
+                        },
+                    )
+                    polish.assert_awaited_once_with(
+                        PolishedEmail(**self.polish_draft),
+                        provider_id=provider_id,
+                        preset_id=preset_id,
+                    )
+                    self.assertEqual(payload, original)
+        connect.assert_not_awaited()
+
+    async def test_polish_passes_custom_profile_and_uses_its_metadata(self) -> None:
+        draft = {
+            **self.polish_draft,
+            "body": "Hello Alex.",
+            "body_html": "<p>Hello <strong>Alex</strong>.</p>",
+        }
+        suggestion = {
+            **self.polish_suggestion,
+            "body": "Hi Alex.",
+            "body_html": "<p>Hi <strong>Alex</strong>.</p>",
+        }
+        polished = {**suggestion, "preset_id": "model-chosen", "preset_revision": 99}
+        polish = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: polished))
+        with (
+            patch.dict(
+                sys.modules,
+                {"sefir_agent.polishing": SimpleNamespace(polish_email=polish)},
+            ),
+            patch("sefir_agent.web_bridge.get_tone_preset") as get_preset,
+            patch(
+                "sefir_agent.web_bridge.Client.connect", new_callable=AsyncMock
+            ) as connect,
+        ):
+            for options in ({}, {"preset_id": None}):
+                with self.subTest(options=options):
+                    polish.reset_mock()
+                    payload = {
+                        "draft": draft,
+                        "provider": "anthropic",
+                        "custom_profile": self.custom_profile,
+                        **options,
+                    }
+                    original = deepcopy(payload)
+
+                    result = await dispatch("polish", payload)
+
+                    self.assertEqual(
+                        result,
+                        {
+                            **suggestion,
+                            "preset_id": "custom:55555555-5555-4555-8555-555555555555",
+                            "preset_revision": 3,
+                        },
+                    )
+                    polish.assert_awaited_once_with(
+                        PolishedEmail(**draft),
+                        provider_id="anthropic",
+                        custom_profile=CustomWritingProfile(**self.custom_profile),
+                    )
+                    self.assertEqual(payload, original)
+        get_preset.assert_not_called()
+        connect.assert_not_awaited()
+
+    async def test_invalid_polish_inputs_never_reach_polisher(self) -> None:
+        polish = AsyncMock()
+        with (
+            patch.dict(
+                sys.modules,
+                {"sefir_agent.polishing": SimpleNamespace(polish_email=polish)},
+            ),
+            patch(
+                "sefir_agent.web_bridge.Client.connect", new_callable=AsyncMock
+            ) as connect,
+        ):
+            with self.assertRaises(KeyError):
+                await dispatch("polish", {})
+            for draft in (
+                None,
+                "",
+                [],
+                {},
+                {"subject": "Hello"},
+                {**self.polish_draft, "subject": " "},
+                {**self.polish_draft, "body": " "},
+                {**self.polish_draft, "subject": 42},
+                {**self.polish_draft, "body_html": None},
+                {**self.polish_draft, "recipient_email": "other@example.com"},
+            ):
+                with self.subTest(draft=draft), self.assertRaises(ValidationError):
+                    await dispatch("polish", {"draft": draft})
+            for preset_id in ("unknown", "", "custom"):
+                with (
+                    self.subTest(preset_id=preset_id),
+                    self.assertRaisesRegex(ValueError, "Unknown preset ID"),
+                ):
+                    await dispatch(
+                        "polish", {"draft": self.polish_draft, "preset_id": preset_id}
+                    )
+            for profile in (
+                False,
+                "",
+                [],
+                {},
+                {**self.custom_profile, "profile_id": "not-a-uuid"},
+                {**self.custom_profile, "revision": True},
+                {**self.custom_profile, "revision": 0},
+                {**self.custom_profile, "revision": 2147483648},
+                {**self.custom_profile, "name": " "},
+                {**self.custom_profile, "content": "text\x00"},
+                {**self.custom_profile, "content": "ğ" * (8 * 1024 + 1)},
+            ):
+                with (
+                    self.subTest(profile=profile),
+                    self.assertRaises((TypeError, ValueError)),
+                ):
+                    await dispatch(
+                        "polish",
+                        {"draft": self.polish_draft, "custom_profile": profile},
+                    )
+        polish.assert_not_awaited()
+        connect.assert_not_awaited()
+
+    async def test_conflicting_styles_never_reach_polisher(self) -> None:
+        polish = AsyncMock()
+        with (
+            patch.dict(
+                sys.modules,
+                {"sefir_agent.polishing": SimpleNamespace(polish_email=polish)},
+            ),
+            patch(
+                "sefir_agent.web_bridge.Client.connect", new_callable=AsyncMock
+            ) as connect,
+        ):
+            for preset_id in ("prof", "formal", "", "unknown"):
+                with (
+                    self.subTest(preset_id=preset_id),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "Choose either a tone preset or a custom writing profile",
+                    ),
+                ):
+                    await dispatch(
+                        "polish",
+                        {
+                            "draft": self.polish_draft,
+                            "preset_id": preset_id,
+                            "custom_profile": self.custom_profile,
+                        },
+                    )
+        polish.assert_not_awaited()
+        connect.assert_not_awaited()
+
+    async def test_polish_provider_configuration_errors_are_sanitized(self) -> None:
+        polish = AsyncMock(side_effect=ProviderConfigurationError("private details"))
+        with (
+            patch.dict(
+                sys.modules,
+                {"sefir_agent.polishing": SimpleNamespace(polish_email=polish)},
+            ),
+            patch(
+                "sefir_agent.web_bridge.Client.connect", new_callable=AsyncMock
+            ) as connect,
+        ):
+            for options, expected_arguments in (
+                ({}, {"preset_id": "prof"}),
+                ({"preset_id": "formal"}, {"preset_id": "formal"}),
+                (
+                    {"custom_profile": self.custom_profile},
+                    {"custom_profile": CustomWritingProfile(**self.custom_profile)},
+                ),
+            ):
+                with self.subTest(options=options):
+                    polish.reset_mock()
+                    payload = {
+                        "draft": self.polish_draft,
+                        "provider": "openai",
+                        **options,
+                    }
+                    original = deepcopy(payload)
+
+                    result = await dispatch("polish", payload)
+
+                    self.assertEqual(result, {"error": "provider_unavailable"})
+                    polish.assert_awaited_once_with(
+                        PolishedEmail(**self.polish_draft),
+                        provider_id="openai",
+                        **expected_arguments,
+                    )
+                    self.assertEqual(payload, original)
+        connect.assert_not_awaited()

@@ -105,6 +105,8 @@ jobs:
         run: uv run --locked ruff format --check .
       - name: Test Python workflows
         run: uv run --locked --package sefir-agent python -m unittest discover -s worker/tests -v
+      - name: Test Python ingestion
+        run: uv run --locked --package sefir-ingestion python -m unittest discover -s ingestion/tests -v
       - name: Check Docker verification script
         working-directory: .
         run: |

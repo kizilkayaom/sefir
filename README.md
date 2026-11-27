@@ -105,6 +105,20 @@ Generation sends the supplied résumé and selected contact details to the chose
 
 The standalone CLI uses environment configuration; it does not read the web settings file. Add `--provider cohere`, `--provider anthropic`, `--provider openai`, or `--provider openrouter` to `sefir-agent draft`; omitting it uses the environment's default. The Docker email verification script calls the web API and therefore uses the web settings, including keys saved through the UI.
 
+## Writing styles and polishing
+
+Choose an account default in **Settings → Writing style**: **Concise professional**, **Warm professional**, **Technical and direct**, or **Formal**. Concise professional is the initial default. On **New draft**, you can override that choice for one generation without changing the account default.
+
+Under **Settings → Custom writing profiles**, upload a UTF-8 Markdown (`.md`) file with YAML frontmatter and style guidance. Start with the [example profile](web/public/writing-profile-example.md), which includes `format_version: 1`, a name, and a language. Files may be up to 32 KiB, with up to 16 KiB of guidance. You can preview, edit, export, and delete profiles in Settings, then select one when generating or polishing an email. Profiles belong to your account and are included in account deletion. Sefir stores the parsed profile rather than retaining a duplicate of the uploaded file.
+
+Saved drafts record the selected preset or custom profile ID and revision. Editing a profile or changing the default style affects future requests; it does not rewrite existing drafts or their approvals. Profile examples guide wording, not claims about your qualifications or relationship with a contact.
+
+To revise a saved AI-generated or manually written email, open it in **Drafts**, choose **Polish wording**, select a provider and style, and click **Suggest wording**. Compare the original and suggested subject and body. **Discard suggestion** leaves the saved draft unchanged. **Accept suggestion** saves a new version with the selected style metadata and the same recipient. Review and approve that new version separately before sending; accepting a suggestion does not send an email. A failed save keeps the suggestion available for review or retry.
+
+Polishing sends the saved email, including its HTML when present, and any selected custom profile guidance to the chosen provider. When using OpenRouter, that information also reaches the provider serving the selected model. Failed requests do not switch providers automatically.
+
+Polishing uses Sefir's own prompt. The external humanizer, Harper, and Vale candidates are not integrated. Sefir checks HTML structure and link attributes and sanitizes formatted content, but factual preservation still requires your review. Check names, qualifications, numbers, dates, negations, and links before accepting a rewrite. Broader quality evaluation across providers remains pending.
+
 ## Google sign-in and Gmail
 
 Use a Google OAuth **Web application** client. Enable the Gmail API in the same Google Cloud project, configure the OAuth consent screen, and add your Google account as a test user if the app is in testing mode. Download the client configuration to `credentials-gmail.json` in the repository root. This file is excluded from Git and the Docker build context.
