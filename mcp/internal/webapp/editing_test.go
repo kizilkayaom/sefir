@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -65,5 +66,58 @@ func TestComposeAndEditDraft(t *testing.T) {
 	}
 	if len(bridge.calls) != 0 {
 		t.Fatal("editing invoked delivery")
+	}
+}
+
+func TestEditDraftPassesOptionalWritingStyle(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		extra  string
+		preset string
+	}{
+		{name: "omitted"},
+		{name: "built-in", extra: `,"preset_id":"technical","preset_revision":3`, preset: "technical"},
+		{name: "custom", extra: `,"preset_id":"custom:` + testID + `","preset_revision":3`, preset: "custom:" + testID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, store, bridge, _ := fixture(t)
+			cookie, csrf := login(t, server)
+			body := `{"subject":"Polished","body":"Polished body","content_hash":"` + store.draft.ContentHash + `"` + test.extra + `}`
+			response := request(server, "POST", "/api/drafts/"+testID+"/versions/1/edit", body, cookie, csrf)
+			if response.Code != 201 {
+				t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+			}
+			if test.preset == "" {
+				if store.editInput.PresetID != nil || store.editInput.PresetRevision != nil {
+					t.Fatal("ordinary edit supplied writing style metadata")
+				}
+			} else if store.editInput.PresetID == nil || *store.editInput.PresetID != test.preset ||
+				store.editInput.PresetRevision == nil || *store.editInput.PresetRevision != 3 {
+				t.Fatal("editing did not forward the selected writing style")
+			}
+			if store.editInput.RecipientEmail != nil || store.editInput.ContentHash != store.draft.ContentHash || len(bridge.calls) != 0 {
+				t.Fatal("saving a suggestion changed the recipient, lost the source hash, or invoked the agent")
+			}
+		})
+	}
+}
+
+func TestEditDraftReturnsInvalidWritingStyleError(t *testing.T) {
+	server, store, bridge, _ := fixture(t)
+	cookie, csrf := login(t, server)
+	store.err = errors.Join(catalogue.ErrInvalidDraftStyle, errors.New("private storage details"))
+	body := `{"subject":"Polished","body":"Polished body","content_hash":"` + store.draft.ContentHash + `","preset_id":"formal"}`
+	response := request(server, "POST", "/api/drafts/"+testID+"/versions/1/edit", body, cookie, csrf)
+	var result struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != 422 || result.Error != catalogue.ErrInvalidDraftStyle.Error() {
+		t.Fatalf("unexpected style error: %d %s", response.Code, response.Body.String())
+	}
+	if len(bridge.calls) != 0 {
+		t.Fatal("invalid style invoked the agent")
 	}
 }

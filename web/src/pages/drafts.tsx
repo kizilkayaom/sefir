@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 
 import { DraftList } from '@/components/draft-list'
 import { DraftPreview } from '@/components/draft-preview'
@@ -17,12 +17,18 @@ export function DraftsPage({ initialDraft = null, onSaved }: {
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<Draft | null>(initialDraft)
   const [hasEdits, setHasEdits] = useState(false)
+  const [discardMessage, setDiscardMessage] = useState('Discard your unsaved email changes?')
   const drafts = useResource<Page<Draft>>(`/api/drafts?limit=25&offset=${offset}`)
   const detail = useResource<Draft>(selected ? `/api/drafts/${selected.draft_id}/versions/${selected.version}` : null)
 
+  const handleDirtyChange = useCallback((dirty: boolean, message = 'Discard your unsaved email changes?') => {
+    setHasEdits(dirty)
+    setDiscardMessage(message)
+  }, [])
+
   function selectDraft(next: Draft | null) {
     if (selected?.draft_id === next?.draft_id && selected?.version === next?.version) return
-    if (hasEdits && !window.confirm('Discard your unsaved email changes?')) return
+    if (hasEdits && !window.confirm(discardMessage)) return
     setHasEdits(false)
     setSelected(next)
   }
@@ -46,7 +52,7 @@ export function DraftsPage({ initialDraft = null, onSaved }: {
           {detail.data && <DraftReview
             key={`${detail.data.draft_id}:${detail.data.version}:${detail.data.content_hash}`}
             draft={detail.data}
-            onDirtyChange={setHasEdits}
+            onDirtyChange={handleDirtyChange}
             onSaved={(saved) => { setHasEdits(false); setSelected(saved); setOffset(0); drafts.reload(); onSaved(saved) }}
           />}
         </div>

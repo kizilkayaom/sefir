@@ -91,7 +91,8 @@ func TestPostgresWebFlow(t *testing.T) {
 	}
 	if revised.DraftID != draft.DraftID || revised.Version != 2 || revised.Body != "Hello there" ||
 		revised.BodyHTML != "<p>Hello <strong>there</strong></p>" || revised.ContentHash == draft.ContentHash ||
-		revised.RecipientEmail == nil || *revised.RecipientEmail != "before@example.com" {
+		revised.RecipientEmail == nil || *revised.RecipientEmail != "before@example.com" ||
+		revised.PresetID != nil || revised.PresetRevision != nil {
 		t.Fatalf("revision lost its saved content or recipient: %+v", revised)
 	}
 	original, err := store.Draft(ctx, draft.DraftID, 1)
@@ -222,6 +223,49 @@ func TestPostgresWebFlow(t *testing.T) {
 			fetched.PresetRevision == nil || *fetched.PresetRevision != revision {
 			t.Fatalf("fetched draft version %d lost its identity or writing style metadata", version)
 		}
+	}
+
+	replacementPreset, replacementRevision := "technical", 2147483647
+	customPreset, customRevision := "custom:22222222-2222-4222-8222-222222222222", 3
+	current := styledRevision
+	for _, edit := range []struct {
+		preset       *string
+		revision     *int
+		wantPreset   string
+		wantRevision int
+	}{
+		{preset: &replacementPreset, revision: &replacementRevision, wantPreset: replacementPreset, wantRevision: replacementRevision},
+		{preset: &customPreset, revision: &customRevision, wantPreset: customPreset, wantRevision: customRevision},
+		{wantPreset: customPreset, wantRevision: customRevision},
+	} {
+		updated, err := store.SaveDraftVersion(ctx, current.DraftID, current.Version, catalogue.EditDraftInput{
+			Subject: "Polished " + current.Subject, Body: current.Body, ContentHash: current.ContentHash,
+			PresetID: edit.preset, PresetRevision: edit.revision,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.DraftID != current.DraftID || updated.Version != current.Version+1 ||
+			updated.PresetID == nil || *updated.PresetID != edit.wantPreset ||
+			updated.PresetRevision == nil || *updated.PresetRevision != edit.wantRevision ||
+			updated.RecipientEmail == nil || *updated.RecipientEmail != *current.RecipientEmail {
+			t.Fatalf("editing did not save the selected style and preserve the recipient: %+v", updated)
+		}
+		for _, expected := range []catalogue.Draft{current, updated} {
+			fetched, err := store.Draft(ctx, expected.DraftID, expected.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fetched.PresetID == nil || *fetched.PresetID != *expected.PresetID ||
+				fetched.PresetRevision == nil || *fetched.PresetRevision != *expected.PresetRevision ||
+				fetched.ContentHash != expected.ContentHash || fetched.Subject != expected.Subject {
+				t.Fatalf("draft version %d lost its saved content or style", expected.Version)
+			}
+		}
+		if activity, err := store.DraftActivity(ctx, updated.DraftID, updated.Version); err != nil || activity != nil {
+			t.Fatal("polished draft version reused an earlier approval")
+		}
+		current = updated
 	}
 
 	webDrafts, err := store.Drafts(ctx, 25, 0)

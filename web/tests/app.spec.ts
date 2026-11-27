@@ -131,8 +131,9 @@ async function mockAPI(page: Page) {
       { id: 'openrouter', name: 'OpenRouter', model: 'openai/gpt-6-luna' },
     ],
     manualRequest: null as Record<string, string> | null,
-    editRequests: [] as Record<string, string>[],
+    editRequests: [] as Record<string, unknown>[],
     editError: false,
+    editWait: null as Promise<void> | null,
   }
   await page.route('**/api/**', async (route) => {
     const request = route.request()
@@ -307,6 +308,7 @@ async function mockAPI(page: Page) {
     if (path.endsWith('/edit')) {
       const input = request.postDataJSON()
       state.editRequests.push(input)
+      if (state.editWait) await state.editWait
       if (state.editError) return reply({ error: 'A newer version exists. Copy your edits before refreshing.' }, 409)
       const original = state.drafts.find((item) => path === `/api/drafts/${item.draft_id}/versions/${item.version}/edit`)
       if (!original) return reply({ error: 'Record not found' }, 404)
@@ -1817,6 +1819,150 @@ test('polishing uses saved defaults and discards suggestions without saving or a
   expect(state.editRequests).toHaveLength(0)
   expect(state.approvalRequests).toHaveLength(0)
   expect(state.presetRequests).toHaveLength(0)
+})
+
+test('accepting a polishing suggestion saves plain text and requires fresh approval', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.defaultPreset = 'formal'
+  const original = structuredClone(state.drafts[0])
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('checkbox', { name: /I reviewed version 1/ }).check()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  await page.getByRole('button', { name: 'Accept suggestion', exact: true }).click()
+  await expect(page.getByRole('heading', { name: `Polished: ${draft.subject}`, exact: true })).toBeVisible()
+  await expect(page.getByRole('checkbox', { name: /I reviewed version 2/ })).not.toBeChecked()
+  await expect(page.getByRole('button', { name: 'Approve and send' })).toBeDisabled()
+  await expect(page.locator('article').getByText(draft.recipient_email, { exact: true })).toBeVisible()
+  expect(state.editRequests).toEqual([{
+    subject: `Polished: ${draft.subject}`,
+    body: 'Hi Alex,\n\nHere is a fictional polished email.\n\nThanks.',
+    body_html: '',
+    content_hash: draft.content_hash,
+    preset_id: 'formal',
+    preset_revision: 1,
+  }])
+  expect(state.drafts[0]).toMatchObject({
+    ...state.editRequests[0], draft_id: draft.draft_id, version: 2,
+    recipient_email: draft.recipient_email, content_hash: 'b'.repeat(64),
+  })
+  expect(state.drafts.find((item) => item.draft_id === draft.draft_id && item.version === 1)).toEqual(original)
+  expect(state.polishingRequests).toHaveLength(1)
+  expect(state.approvalRequests).toHaveLength(0)
+  await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+  await expect(page).toHaveURL(/#contacts$/)
+  await page.getByRole('link', { name: 'Drafts', exact: true }).click()
+  await expect(page.getByRole('heading', { name: `Polished: ${draft.subject}`, exact: true })).toBeVisible()
+})
+
+test('accepting a polishing suggestion preserves HTML, custom style revision, and a missing recipient', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  state.drafts = [{ ...missingRecipient, body: 'Hello Alex.', body_html: '<p>Hello <strong>Alex</strong>.</p>' }]
+  state.polishingOverrides = { body: 'Hi Alex.', body_html: '<p>Hi <strong>Alex</strong>.</p>' }
+  const original = structuredClone(state.drafts[0])
+  await page.goto('/')
+  await page.getByRole('button', { name: /Needs a recipient/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  await page.getByLabel('Writing style', { exact: true }).selectOption('custom')
+  await page.getByLabel('Custom writing profile', { exact: true }).selectOption(writingProfile.profile_id)
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  state.writingProfiles = [{ ...writingProfile, revision: 4 }]
+  await page.getByRole('button', { name: 'Accept suggestion', exact: true }).click()
+  await expect(page.getByRole('heading', { name: `Polished: ${missingRecipient.subject}`, exact: true })).toBeVisible()
+  await expect(page.locator('article strong')).toHaveText('Alex')
+  await expect(page.getByText('Edit this draft and enter a recipient before approving.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Approve and send' })).toBeDisabled()
+  expect(state.editRequests).toEqual([{
+    subject: `Polished: ${missingRecipient.subject}`,
+    body: 'Hi Alex.',
+    body_html: '<p>Hi <strong>Alex</strong>.</p>',
+    content_hash: missingRecipient.content_hash,
+    preset_id: `custom:${writingProfile.profile_id}`,
+    preset_revision: 3,
+  }])
+  expect(state.drafts[0]).toMatchObject({
+    ...state.editRequests[0], draft_id: missingRecipient.draft_id, version: 2,
+    recipient_email: null, content_hash: 'b'.repeat(64),
+  })
+  expect(state.drafts[1]).toEqual(original)
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('polishing save errors retain the suggestion and unsaved changes for retry', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.editError = true
+  const originals = structuredClone(state.drafts)
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  await page.getByRole('button', { name: 'Accept suggestion', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('A newer version exists')
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toContainText(`Polished: ${draft.subject}`)
+  await expect(page.getByRole('button', { name: 'Accept suggestion', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Discard suggestion', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Back to draft', exact: true })).toBeEnabled()
+  page.once('dialog', (dialog) => dialog.dismiss())
+  await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+  page.once('dialog', (dialog) => dialog.dismiss())
+  await page.getByRole('button', { name: /Needs a recipient/ }).click()
+  await expect(page.getByRole('alert')).toContainText('A newer version exists')
+  expect(state.drafts).toEqual(originals)
+  state.editError = false
+  await page.getByRole('button', { name: 'Accept suggestion', exact: true }).click()
+  await expect(page.getByRole('checkbox', { name: /I reviewed version 2/ })).not.toBeChecked()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(state.editRequests).toHaveLength(2)
+  expect(state.editRequests[1]).toEqual(state.editRequests[0])
+  expect(state.polishingRequests).toHaveLength(1)
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('polishing saves prevent duplicates and warn before leaving without applying late responses', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishSaving!: () => void
+  state.editWait = new Promise<void>((resolve) => { finishSaving = resolve })
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  try {
+    await page.getByRole('button', { name: 'Accept suggestion', exact: true }).evaluate((button) => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await expect.poll(() => state.editRequests.length).toBe(1)
+    await expect(page.getByRole('button', { name: 'Saving…', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Discard suggestion', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Back to draft', exact: true })).toBeDisabled()
+    await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toBeVisible()
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toContain('Saving may still complete after you leave.')
+      await dialog.dismiss()
+    })
+    await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toContain('Saving may still complete after you leave.')
+      await dialog.dismiss()
+    })
+    await page.getByRole('button', { name: /Needs a recipient/ }).click()
+    await expect(page.getByRole('button', { name: 'Saving…', exact: true })).toBeDisabled()
+    const aborted = page.waitForEvent('requestfailed', (request) => request.url().endsWith('/edit'))
+    page.once('dialog', (dialog) => dialog.accept())
+    await page.getByRole('button', { name: /Needs a recipient/ }).click()
+    await aborted
+    await expect(page.getByRole('heading', { name: missingRecipient.subject, exact: true })).toBeVisible()
+  } finally {
+    state.editWait = null
+    finishSaving()
+  }
+  await expect.poll(() => state.drafts.some((item) => item.draft_id === draft.draft_id && item.version === 2)).toBe(true)
+  await expect(page.getByRole('heading', { name: missingRecipient.subject, exact: true })).toBeVisible()
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toHaveCount(0)
+  expect(state.editRequests).toHaveLength(1)
+  expect(state.approvalRequests).toHaveLength(0)
 })
 
 test('polishing keeps custom profile selections after failure and prevents duplicate requests', async ({ page }) => {

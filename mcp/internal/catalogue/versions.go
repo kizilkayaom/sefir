@@ -3,6 +3,7 @@ package catalogue
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -11,6 +12,7 @@ import (
 )
 
 var ErrDraftConflict = errors.New("a newer draft version exists or the draft has changed")
+var ErrInvalidDraftStyle = errors.New("preset_id and preset_revision must be supplied together with a non-blank ID and a revision between 1 and 2147483647")
 
 type EditDraftInput struct {
 	RecipientEmail *string `json:"recipient_email,omitempty"`
@@ -18,9 +20,18 @@ type EditDraftInput struct {
 	Body           string  `json:"body"`
 	BodyHTML       string  `json:"body_html"`
 	ContentHash    string  `json:"content_hash"`
+	PresetID       *string `json:"preset_id,omitempty"`
+	PresetRevision *int    `json:"preset_revision,omitempty"`
 }
 
 func SaveDraftVersion(ctx context.Context, pool *pgxpool.Pool, id string, version int, input EditDraftInput) (Draft, error) {
+	if (input.PresetID == nil) != (input.PresetRevision == nil) {
+		return Draft{}, ErrInvalidDraftStyle
+	}
+	if input.PresetID != nil && (strings.TrimSpace(*input.PresetID) == "" ||
+		*input.PresetRevision < 1 || *input.PresetRevision > 2147483647) {
+		return Draft{}, ErrInvalidDraftStyle
+	}
 	subject, body, bodyHTML, err := draftcontent.Prepare(input.Subject, input.Body, input.BodyHTML)
 	if err != nil {
 		return Draft{}, err
@@ -56,6 +67,9 @@ func SaveDraftVersion(ctx context.Context, pool *pgxpool.Pool, id string, versio
 	}
 	if input.RecipientEmail != nil {
 		recipient = input.RecipientEmail
+	}
+	if input.PresetID != nil {
+		presetID, presetRevision = input.PresetID, input.PresetRevision
 	}
 	hash, err := draftcontent.HashWithHTML(recipient, subject, body, bodyHTML)
 	if err != nil {

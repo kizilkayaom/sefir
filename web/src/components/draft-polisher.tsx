@@ -13,11 +13,12 @@ import type { Draft, PolishSuggestion } from '@/types/draft'
 
 type DraftPolisherProps = {
   draft: Draft
+  onSaved: (draft: Draft) => void
   onCancel: () => void
-  onDirtyChange: (dirty: boolean) => void
+  onDirtyChange: (dirty: boolean, message?: string) => void
 }
 
-export function DraftPolisher({ draft, onCancel, onDirtyChange }: DraftPolisherProps) {
+export function DraftPolisher({ draft, onSaved, onCancel, onDirtyChange }: DraftPolisherProps) {
   const id = useId()
   const ai = useResource<AISettings>('/api/settings/ai')
   const account = useResource<AccountStatus>('/api/settings/account')
@@ -26,16 +27,18 @@ export function DraftPolisher({ draft, onCancel, onDirtyChange }: DraftPolisherP
   const [customProfile, setCustomProfile] = useState<WritingStyleProfile | null>(null)
   const [suggestion, setSuggestion] = useState<PolishSuggestion | null>(null)
   const [busy, setBusy] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const activeRequest = useRef<AbortController | null>(null)
   const styleID = styleOverride || account.data?.default_preset_id || ''
   const usingCustomProfile = styleID === 'custom'
   const providerID = provider || ai.data?.default_provider || ''
   const selectedProvider = ai.data?.providers.find((item) => item.id === providerID)
-  const canPolish = !busy && !suggestion && !ai.loading && !ai.error && !!selectedProvider &&
+  const canPolish = !busy && !saving && !suggestion && !ai.loading && !ai.error && !!selectedProvider &&
     !account.loading && !account.error && !!account.data && !!styleID && (!usingCustomProfile || !!customProfile)
-  const discardMessage = busy ? 'Cancel polishing and leave this draft?' : 'Discard this polishing suggestion?'
-  useUnsavedChanges(busy || suggestion !== null, discardMessage)
+  const savingMessage = 'Leave while this suggestion is being saved? Saving may still complete after you leave.'
+  const discardMessage = saving ? savingMessage : busy ? 'Cancel polishing and leave this draft?' : 'Discard this polishing suggestion?'
+  useUnsavedChanges(busy || saving || suggestion !== null, discardMessage)
 
   useEffect(() => () => {
     activeRequest.current?.abort()
@@ -86,7 +89,48 @@ export function DraftPolisher({ draft, onCancel, onDirtyChange }: DraftPolisherP
     }
   }
 
+  async function acceptSuggestion() {
+    if (!suggestion || saving || activeRequest.current) return
+    if (suggestion.draft_id !== draft.draft_id || suggestion.version !== draft.version || suggestion.source_content_hash !== draft.content_hash) {
+      setError('The suggestion does not match this draft. Reload the draft and try again.')
+      return
+    }
+    const controller = new AbortController()
+    activeRequest.current = controller
+    setSaving(true)
+    setError('')
+    onDirtyChange(true, savingMessage)
+    try {
+      const saved = await api<Draft>(`/api/drafts/${draft.draft_id}/versions/${draft.version}/edit`, {
+        method: 'POST',
+        signal: controller.signal,
+        body: JSON.stringify({
+          subject: suggestion.subject,
+          body: suggestion.body,
+          body_html: suggestion.body_html,
+          content_hash: suggestion.source_content_hash,
+          preset_id: suggestion.preset_id,
+          preset_revision: suggestion.preset_revision,
+        }),
+      })
+      if (controller.signal.aborted) return
+      onDirtyChange(false)
+      onSaved(saved)
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setError(errorMessage(error))
+        onDirtyChange(true)
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        activeRequest.current = null
+        setSaving(false)
+      }
+    }
+  }
+
   function cancel() {
+    if (saving || (suggestion && activeRequest.current)) return
     if ((activeRequest.current || suggestion) && !window.confirm(discardMessage)) return
     activeRequest.current?.abort()
     activeRequest.current = null
@@ -95,6 +139,7 @@ export function DraftPolisher({ draft, onCancel, onDirtyChange }: DraftPolisherP
   }
 
   function discard() {
+    if (saving || activeRequest.current) return
     setSuggestion(null)
     setError('')
     onDirtyChange(false)
@@ -107,12 +152,17 @@ export function DraftPolisher({ draft, onCancel, onDirtyChange }: DraftPolisherP
           <h2 className="text-xl font-semibold">Polish wording</h2>
           <p className="mt-1 text-sm text-muted-foreground">Choose a provider and writing style to suggest changes to this saved draft.</p>
         </div>
-        <Button type="button" variant="outline" onClick={cancel}>{busy ? 'Cancel polishing' : 'Back to draft'}</Button>
+        <Button type="button" variant="outline" disabled={saving} onClick={cancel}>{busy ? 'Cancel polishing' : 'Back to draft'}</Button>
       </div>
       {suggestion ? (
         <>
           <PolishComparison draft={draft} suggestion={suggestion} />
-          <Button type="button" variant="outline" onClick={discard}>Discard suggestion</Button>
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+          {saving && <p role="status" className="text-sm">Saving a new draft version. You will need to review and approve it before sending.</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" disabled={saving} onClick={acceptSuggestion}>{saving ? 'Saving…' : 'Accept suggestion'}</Button>
+            <Button type="button" variant="outline" disabled={saving} onClick={discard}>Discard suggestion</Button>
+          </div>
         </>
       ) : (
         <form aria-label="Polish wording" onSubmit={polish} className="rounded-xl border bg-card p-6">

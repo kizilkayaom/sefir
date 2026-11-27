@@ -12,7 +12,7 @@ import type { Draft } from '@/types/draft'
 export function DraftReview({ draft, onSaved, onDirtyChange }: {
   draft: Draft
   onSaved: (draft: Draft) => void
-  onDirtyChange: (dirty: boolean) => void
+  onDirtyChange: (dirty: boolean, message?: string) => void
 }) {
   const path = `/api/drafts/${draft.draft_id}/versions/${draft.version}`
   const status = useResource<DraftStatus>(`${path}/status`)
@@ -58,7 +58,7 @@ export function DraftReview({ draft, onSaved, onDirtyChange }: {
   )
 
   if (polishing) return (
-    <DraftPolisher draft={draft} onDirtyChange={onDirtyChange} onCancel={() => { setPolishing(false); status.reload() }} />
+    <DraftPolisher draft={draft} onSaved={onSaved} onDirtyChange={onDirtyChange} onCancel={() => { setPolishing(false); status.reload() }} />
   )
 
   return (

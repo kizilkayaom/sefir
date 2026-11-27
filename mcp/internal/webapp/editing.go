@@ -65,6 +65,10 @@ func (s *Server) handleEditDraft(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	draft, err := s.store.SaveDraftVersion(ctx, id, version, input)
+	if errors.Is(err, catalogue.ErrInvalidDraftStyle) {
+		fail(w, http.StatusUnprocessableEntity, catalogue.ErrInvalidDraftStyle.Error())
+		return
+	}
 	if errors.Is(err, catalogue.ErrDraftConflict) {
 		fail(w, http.StatusConflict, "A newer version exists or this draft changed. Your edits are still here; copy them before refreshing to open the latest version.")
 		return
