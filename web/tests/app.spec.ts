@@ -107,6 +107,10 @@ async function mockAPI(page: Page) {
     generationRequests: [] as Record<string, string>[],
     generationError: false,
     generationWait: null as Promise<void> | null,
+    polishingRequests: [] as { path: string, input: Record<string, string> }[],
+    polishingWait: null as Promise<void> | null,
+    polishingError: false,
+    polishingOverrides: {} as Record<string, unknown>,
     providerError: false,
     aiOperator: false,
     providerSaveError: false,
@@ -309,6 +313,25 @@ async function mockAPI(page: Page) {
       const saved = { ...original, ...input, version: original.version + 1, content_hash: 'b'.repeat(64) }
       state.drafts.unshift(saved)
       return reply(saved, 201)
+    }
+    if (path.endsWith('/polish')) {
+      const input = request.postDataJSON()
+      const original = state.drafts.find((item) => path === `/api/drafts/${item.draft_id}/versions/${item.version}/polish`)
+      state.polishingRequests.push({ path, input })
+      if (!original) return reply({ error: 'Record not found' }, 404)
+      if (state.polishingWait) await state.polishingWait
+      if (state.polishingError) return reply({ error: 'Email polishing failed. Please try again.' }, 502)
+      return reply({
+        draft_id: original.draft_id,
+        version: original.version,
+        source_content_hash: original.content_hash,
+        subject: `Polished: ${original.subject}`,
+        body: 'Hi Alex,\n\nHere is a fictional polished email.\n\nThanks.',
+        body_html: '',
+        preset_id: input.profile_id ? `custom:${input.profile_id}` : input.preset_id,
+        preset_revision: input.profile_id ? writingProfile.revision : 1,
+        ...state.polishingOverrides,
+      })
     }
     if (path.startsWith('/api/drafts/')) {
       const found = state.drafts.find((item) => path === `/api/drafts/${item.draft_id}/versions/${item.version}`)
@@ -1758,6 +1781,241 @@ test('stale edit errors preserve text and cancelling protects unsaved changes', 
   await page.getByRole('button', { name: 'Cancel editing' }).click()
   await expect(page.getByRole('heading', { name: draft.subject })).toBeVisible()
   expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('polishing uses saved defaults and discards suggestions without saving or approving', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.defaultProvider = 'openai'
+  state.defaultPreset = 'formal'
+  const originals = structuredClone(state.drafts)
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('checkbox', { name: /I reviewed version 1/ }).check()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Approve and send' })).toHaveCount(0)
+  await expect(page.getByLabel('AI provider', { exact: true })).toHaveValue('openai')
+  await expect(page.getByLabel('Writing style', { exact: true })).toHaveValue('formal')
+  await expect(page.getByText('Polishing sends this saved email to OpenAI (GPT).', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  await expect(page.getByRole('article', { name: 'Original', exact: true })).toContainText(draft.body)
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toContainText(`Polished: ${draft.subject}`)
+  await expect(page.getByText('Review names, facts, dates, and links before accepting. This suggestion has not been saved or sent.', { exact: true })).toBeVisible()
+  expect(state.polishingRequests).toEqual([{
+    path: `/api/drafts/${draft.draft_id}/versions/1/polish`,
+    input: { content_hash: draft.content_hash, provider: 'openai', preset_id: 'formal' },
+  }])
+  page.once('dialog', (dialog) => dialog.dismiss())
+  await page.getByRole('button', { name: 'Back to draft', exact: true }).click()
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Discard suggestion', exact: true }).click()
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Writing style', { exact: true })).toHaveValue('formal')
+  await page.getByRole('button', { name: 'Back to draft', exact: true }).click()
+  await expect(page.getByRole('checkbox', { name: /I reviewed version 1/ })).not.toBeChecked()
+  await expect(page.getByRole('button', { name: 'Approve and send' })).toBeDisabled()
+  expect(state.drafts).toEqual(originals)
+  expect(state.editRequests).toHaveLength(0)
+  expect(state.approvalRequests).toHaveLength(0)
+  expect(state.presetRequests).toHaveLength(0)
+})
+
+test('polishing keeps custom profile selections after failure and prevents duplicate requests', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.writingProfiles = [writingProfile]
+  state.polishingError = true
+  let finishPolishing!: () => void
+  state.polishingWait = new Promise<void>((resolve) => { finishPolishing = resolve })
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  await page.getByLabel('AI provider', { exact: true }).selectOption('openrouter')
+  await expect(page.getByText('OpenRouter forwards this information to the provider serving your selected model.', { exact: true })).toBeVisible()
+  await page.getByLabel('Writing style', { exact: true }).selectOption('custom')
+  await expect(page.getByRole('button', { name: 'Suggest wording', exact: true })).toBeDisabled()
+  await page.getByLabel('Custom writing profile', { exact: true }).selectOption(writingProfile.profile_id)
+  await expect(page.getByText('Polishing sends this saved email and your selected writing profile to OpenRouter.', { exact: true })).toBeVisible()
+  try {
+    await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+    await expect.poll(() => state.polishingRequests.length).toBe(1)
+    await expect(page.getByRole('form', { name: 'Polish wording' }).locator('input:enabled, select:enabled, button:enabled')).toHaveCount(0)
+    await page.getByRole('form', { name: 'Polish wording' }).evaluate((form: HTMLFormElement) => form.requestSubmit())
+    await expect(page.getByText('Polishing your draft. This may take a minute.', { exact: true })).toBeVisible()
+    expect(state.polishingRequests).toHaveLength(1)
+  } finally {
+    state.polishingWait = null
+    finishPolishing()
+  }
+  await expect(page.getByRole('alert')).toHaveText('Email polishing failed. Please try again.')
+  await expect(page.getByLabel('AI provider', { exact: true })).toHaveValue('openrouter')
+  await expect(page.getByLabel('Writing style', { exact: true })).toHaveValue('custom')
+  await expect(page.getByLabel('Custom writing profile', { exact: true })).toHaveValue(writingProfile.profile_id)
+  state.polishingError = false
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toBeVisible()
+  expect(state.polishingRequests.map((request) => request.input)).toEqual(Array(2).fill({
+    content_hash: draft.content_hash, provider: 'openrouter', profile_id: writingProfile.profile_id,
+  }))
+  expect(state.editRequests).toHaveLength(0)
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('polishing rejects mismatched and malformed suggestions and allows retry', async ({ page }) => {
+  const state = await mockAPI(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  for (const override of [
+    { draft_id: missingRecipient.draft_id },
+    { version: 2 },
+    { source_content_hash: 'b'.repeat(64) },
+  ]) {
+    state.polishingOverrides = override
+    await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+    await expect(page.getByRole('alert')).toHaveText('The suggestion does not match this draft. Reload the draft and try again.')
+    await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toHaveCount(0)
+  }
+  state.polishingOverrides = { body: { unexpected: 'object' } }
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText('The server returned an invalid polishing suggestion.')
+  state.polishingOverrides = {}
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toBeVisible()
+  expect(state.polishingRequests).toHaveLength(5)
+  expect(state.editRequests).toHaveLength(0)
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('polishing handles settings loading, retries, and an unconfigured installation', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.providerError = true
+  state.accountError = true
+  let finishAccount!: () => void
+  state.accountWait = new Promise<void>((resolve) => { finishAccount = resolve })
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  try {
+    await expect(page.getByText('Loading writing style…', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Retry AI providers', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Suggest wording', exact: true })).toBeDisabled()
+  } finally {
+    state.accountWait = null
+    finishAccount()
+  }
+  await expect(page.getByRole('button', { name: 'Retry writing style', exact: true })).toBeVisible()
+  const providers = state.providers
+  state.providers = []
+  state.providerError = false
+  state.accountError = false
+  await page.getByRole('button', { name: 'Retry AI providers', exact: true }).click()
+  await page.getByRole('button', { name: 'Retry writing style', exact: true }).click()
+  await expect(page.getByText('AI polishing is not configured on this installation. Your saved draft is unchanged.', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Writing style', { exact: true })).toHaveValue('prof')
+  await expect(page.getByRole('button', { name: 'Suggest wording', exact: true })).toBeDisabled()
+  expect(state.polishingRequests).toHaveLength(0)
+  state.providers = providers
+  await page.getByRole('button', { name: 'Back to draft', exact: true }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Suggest wording', exact: true })).toBeEnabled()
+})
+
+test('polishing cancellation aborts a pending request and leaves the draft unchanged', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishPolishing!: () => void
+  state.polishingWait = new Promise<void>((resolve) => { finishPolishing = resolve })
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  try {
+    await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+    await expect.poll(() => state.polishingRequests.length).toBe(1)
+    page.once('dialog', (dialog) => dialog.dismiss())
+    await page.getByRole('button', { name: 'Cancel polishing', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Polishing…', exact: true })).toBeVisible()
+    const aborted = page.waitForEvent('requestfailed', (request) => request.url().endsWith('/polish'))
+    page.once('dialog', (dialog) => dialog.accept())
+    await page.getByRole('button', { name: 'Cancel polishing', exact: true }).click()
+    await aborted
+    await expect(page.getByRole('heading', { name: draft.subject, exact: true })).toBeVisible()
+  } finally {
+    state.polishingWait = null
+    finishPolishing()
+  }
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: /Needs a recipient/ }).click()
+  await expect(page.getByRole('heading', { name: missingRecipient.subject, exact: true })).toBeVisible()
+  expect(state.editRequests).toHaveLength(0)
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('polishing protects draft switching and ignores an old response after unmount', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishPolishing!: () => void
+  state.polishingWait = new Promise<void>((resolve) => { finishPolishing = resolve })
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  try {
+    await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+    await expect.poll(() => state.polishingRequests.length).toBe(1)
+    page.once('dialog', (dialog) => dialog.dismiss())
+    await page.getByRole('button', { name: /Needs a recipient/ }).click()
+    await expect(page.getByRole('button', { name: 'Polishing…', exact: true })).toBeVisible()
+    const aborted = page.waitForEvent('requestfailed', (request) => request.url().endsWith('/polish'))
+    page.once('dialog', (dialog) => dialog.accept())
+    await page.getByRole('button', { name: /Needs a recipient/ }).click()
+    await aborted
+    await expect(page.getByRole('heading', { name: missingRecipient.subject, exact: true })).toBeVisible()
+    state.polishingWait = null
+    await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+    await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+    await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toContainText(`Polished: ${missingRecipient.subject}`)
+  } finally {
+    state.polishingWait = null
+    finishPolishing()
+  }
+  page.once('dialog', (dialog) => dialog.dismiss())
+  await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+  await expect(page.getByRole('article', { name: 'Suggested wording', exact: true })).toContainText(`Polished: ${missingRecipient.subject}`)
+  expect(state.polishingRequests).toHaveLength(2)
+  expect(state.editRequests).toHaveLength(0)
+  expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('polishing compares sanitized formatted emails on desktop and mobile', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.drafts = [{ ...draft, body_html: '<p>Hello <strong>Alex</strong>.</p>' }]
+  state.polishingOverrides = { body_html: '<p>Hi <strong>Alex</strong>.</p><img src="invalid" onerror="window.badPolish=true"><script>window.badPolish=true</script><a href="javascript:alert(1)">Unsafe link</a>' }
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await page.getByRole('button', { name: 'Polish wording', exact: true }).click()
+  await page.getByRole('button', { name: 'Suggest wording', exact: true }).click()
+  const original = page.getByRole('article', { name: 'Original', exact: true })
+  const suggestion = page.getByRole('article', { name: 'Suggested wording', exact: true })
+  await expect(original.locator('strong')).toHaveText('Alex')
+  await expect(suggestion.locator('strong')).toHaveText('Alex')
+  await expect(suggestion.locator('img, script, a[href]')).toHaveCount(0)
+  expect(await page.evaluate(() => 'badPolish' in window)).toBe(false)
+  expect((await suggestion.boundingBox())!.x).toBeGreaterThan((await original.boundingBox())!.x)
+  await page.screenshot({ path: test.info().outputPath('polish-desktop.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect((await suggestion.boundingBox())!.y).toBeGreaterThan((await original.boundingBox())!.y)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: test.info().outputPath('polish-mobile.png'), fullPage: true })
+})
+
+test('polishing uses the same workflow restrictions as editing', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.status = 'RUNNING'
+  await page.goto('/')
+  await page.getByRole('button', { name: /An introduction/ }).click()
+  await expect(page.getByRole('button', { name: 'Edit draft', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Polish wording', exact: true })).toBeDisabled()
+  state.status = 'NOT_STARTED'
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Polish wording', exact: true })).toBeEnabled()
+  expect(state.polishingRequests).toHaveLength(0)
 })
 
 test('rich preview removes active content and preserves readable formatting', async ({ page }) => {

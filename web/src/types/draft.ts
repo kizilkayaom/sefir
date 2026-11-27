@@ -11,3 +11,14 @@ export type Draft = {
   preset_id: string | null
   preset_revision: number | null
 }
+
+export type PolishSuggestion = {
+  draft_id: string
+  version: number
+  source_content_hash: string
+  subject: string
+  body: string
+  body_html: string
+  preset_id: string
+  preset_revision: number
+}

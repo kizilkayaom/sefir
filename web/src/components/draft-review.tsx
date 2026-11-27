@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { DraftPreview } from '@/components/draft-preview'
 import { DraftEditor } from '@/components/draft-editor'
+import { DraftPolisher } from '@/components/draft-polisher'
 import { Button } from '@/components/ui/button'
 import { useResource } from '@/hooks/use-resource'
 import { api, errorMessage } from '@/lib/api'
@@ -20,6 +21,7 @@ export function DraftReview({ draft, onSaved, onDirtyChange }: {
   const [submitted, setSubmitted] = useState(false)
   const [error, setError] = useState('')
   const [editing, setEditing] = useState(false)
+  const [polishing, setPolishing] = useState(false)
   const delivery = status.data?.delivery
   const workflow = status.data?.workflow
   const canEdit = !busy && !submitted && !status.loading && !!status.data &&
@@ -55,9 +57,14 @@ export function DraftReview({ draft, onSaved, onDirtyChange }: {
     <DraftEditor draft={draft} onSaved={onSaved} onCancel={() => setEditing(false)} onDirtyChange={onDirtyChange} />
   )
 
+  if (polishing) return (
+    <DraftPolisher draft={draft} onDirtyChange={onDirtyChange} onCancel={() => { setPolishing(false); status.reload() }} />
+  )
+
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button variant="outline" disabled={!canEdit} onClick={() => { setReviewed(false); setError(''); setPolishing(true) }}>Polish wording</Button>
         <Button variant="outline" disabled={!canEdit} onClick={() => { setReviewed(false); setEditing(true) }}>Edit draft</Button>
       </div>
       <DraftPreview draft={draft} />
