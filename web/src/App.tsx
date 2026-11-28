@@ -6,6 +6,7 @@ import { ThemeControl } from '@/components/theme-control'
 import { Button } from '@/components/ui/button'
 import { useResource } from '@/hooks/use-resource'
 import { api, errorMessage, setCSRFToken } from '@/lib/api'
+import { watchHashNavigation } from '@/lib/navigation'
 import { cn } from '@/lib/utils'
 import { ActivityPage } from '@/pages/activity'
 import { ContactsPage } from '@/pages/contacts'
@@ -63,12 +64,11 @@ function App() {
       setContact(null)
       setCreatedDraft(null)
     }
-    const navigate = () => setPage(currentPage())
+    const stopNavigation = watchHashNavigation(() => setPage(currentPage()))
     window.addEventListener('sefir-session-expired', expired)
-    window.addEventListener('hashchange', navigate)
     return () => {
       window.removeEventListener('sefir-session-expired', expired)
-      window.removeEventListener('hashchange', navigate)
+      stopNavigation()
     }
   }, [])
 

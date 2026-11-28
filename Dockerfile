@@ -35,7 +35,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 
 COPY agent/ ./
 
-RUN uv sync --locked --no-dev --no-editable --package sefir-agent --no-cache
+RUN uv sync --locked --no-dev --no-editable --all-packages --no-cache
 
 FROM python:3.13.18-slim-bookworm AS runtime
 

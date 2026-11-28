@@ -3,11 +3,12 @@ from dataclasses import FrozenInstanceError
 from io import BytesIO
 from unittest.mock import patch
 
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter, get_configuration
 from pypdf.errors import PdfReadError
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from sefir_ingestion.resume import (
+    PDF_COMPLEXITY_ERROR,
     ExtractedResume,
     ResumeExtractionError,
     extract_resume_pdf,
@@ -40,7 +41,51 @@ def make_pdf(pages: list[str], password: str | None = None) -> bytes:
         return stream.getvalue()
 
 
+def make_compressed_pdf(sizes: list[int]) -> bytes:
+    with (
+        PdfReader(
+            BytesIO(make_pdf([f"Fictional page {i}" for i in range(len(sizes))]))
+        ) as reader,
+        PdfWriter() as writer,
+        BytesIO() as stream,
+    ):
+        writer.append(reader)
+        for page, size in zip(writer.pages, sizes, strict=True):
+            contents = page["/Contents"].get_object()
+            original = contents.get_data()
+            contents.set_data(b" " * (size - len(original)) + original)
+            page[NameObject("/Contents")] = writer._add_object(contents.flate_encode())
+        writer.compress_identical_objects()
+        writer.write(stream)
+        return stream.getvalue()
+
+
 class ResumeExtractionTests(unittest.TestCase):
+    def test_compressed_content_limits_and_configuration_restoration(self) -> None:
+        configuration = get_configuration()
+        with (
+            patch("sefir_ingestion.resume.MAX_STREAM_BYTES", 2048),
+            patch("sefir_ingestion.resume.MAX_CONTENT_BYTES", 4096),
+        ):
+            result = extract_resume_pdf(make_compressed_pdf([2048, 2048]))
+            self.assertEqual(result.text, "Fictional page 0\n\nFictional page 1")
+            self.assertIs(get_configuration(), configuration)
+
+            for sizes in ([2049], [1500, 1500, 1500]):
+                with self.subTest(sizes=sizes):
+                    with self.assertRaises(ResumeExtractionError) as raised:
+                        extract_resume_pdf(make_compressed_pdf(sizes))
+                    self.assertEqual(str(raised.exception), PDF_COMPLEXITY_ERROR)
+                    self.assertIs(get_configuration(), configuration)
+
+    def test_memory_exhaustion_returns_safe_validation_error(self) -> None:
+        with patch(
+            "pypdf.PageObject.extract_text", side_effect=MemoryError("private details")
+        ):
+            with self.assertRaises(ResumeExtractionError) as raised:
+                extract_resume_pdf(make_pdf(["Fictional résumé"]))
+        self.assertEqual(str(raised.exception), PDF_COMPLEXITY_ERROR)
+
     def test_extracts_pages_in_order_and_preserves_facts(self) -> None:
         first = "Alex Example: 3 years of Go experience."
         second = "Available 15 January 2027. https://example.com/portfolio"

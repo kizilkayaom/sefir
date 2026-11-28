@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 
 import { PageControls } from '@/components/page-controls'
 import { EmailEditor } from '@/components/email-editor'
+import { ResumeInput } from '@/components/resume-input'
 import { Button } from '@/components/ui/button'
 import { WritingProfilePicker } from '@/components/writing-profile-picker'
 import { useResource } from '@/hooks/use-resource'
@@ -28,18 +29,21 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
   const providerID = provider || ai.data?.default_provider || ''
   const selectedProvider = ai.data?.providers.find((item) => item.id === providerID)
   const [cv, setCV] = useState('')
+  const [extracting, setExtracting] = useState(false)
+  const cvFits = !!cv.trim() && new TextEncoder().encode(cv).length <= 100000
   const [mode, setMode] = useState<'generate' | 'write'>('generate')
   const [subject, setSubject] = useState('')
   const [content, setContent] = useState<EmailContent>({ html: '', text: '' })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  useUnsavedChanges(!!subject || !!content.text.trim())
+  useUnsavedChanges(!!subject || !!content.text.trim() || !!cv.trim() || extracting,
+    extracting ? 'Cancel résumé extraction and discard unsaved changes?' : 'Discard your unsaved résumé and email changes?')
   const choices = (contacts.data?.items ?? []).filter((item) => item.status === 'confirmed')
   if (selected && !choices.some((item) => item.id === selected.id)) choices.unshift(selected)
 
   async function generate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!selected || busy || (mode === 'generate' && (!selectedProvider || !account.data || missingCustomProfile))) return
+    if (!selected || busy || extracting || (mode === 'generate' && (!cvFits || !selectedProvider || !account.data || missingCustomProfile))) return
     setBusy(true)
     setError('')
     try {
@@ -71,8 +75,8 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
       <p className="mt-2 text-muted-foreground">Write an email yourself or generate a starting draft to edit and review.</p>
       <form onSubmit={generate} className="mt-6 space-y-5 rounded-xl border bg-card p-6">
         <div role="group" aria-label="Draft creation method" className="flex flex-wrap gap-2">
-          <Button type="button" variant={mode === 'generate' ? 'secondary' : 'ghost'} aria-pressed={mode === 'generate'} disabled={busy} onClick={() => { setMode('generate'); setError('') }}>Generate with AI</Button>
-          <Button type="button" variant={mode === 'write' ? 'secondary' : 'ghost'} aria-pressed={mode === 'write'} disabled={busy} onClick={() => { setMode('write'); setError('') }}>Write yourself</Button>
+          <Button type="button" variant={mode === 'generate' ? 'secondary' : 'ghost'} aria-pressed={mode === 'generate'} disabled={busy || extracting} onClick={() => { setMode('generate'); setError('') }}>Generate with AI</Button>
+          <Button type="button" variant={mode === 'write' ? 'secondary' : 'ghost'} aria-pressed={mode === 'write'} disabled={busy || extracting} onClick={() => { setMode('write'); setError('') }}>Write yourself</Button>
         </div>
         <div>
           <label htmlFor="draft-contact" className="block text-sm font-medium">Contact</label>
@@ -132,9 +136,7 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
                 </div>
               )}
             </div>}
-            <label className="block text-sm font-medium">Résumé text
-              <textarea className="field mt-2 min-h-64" required maxLength={100000} disabled={busy} value={cv} onChange={(event) => setCV(event.target.value)} placeholder="Paste your résumé as plain text." />
-            </label>
+            <ResumeInput value={cv} onChange={setCV} disabled={busy} onExtractingChange={setExtracting} />
           </>
         ) : (
           <>
@@ -147,7 +149,7 @@ export function GeneratePage({ contact, onCreated }: { contact: Contact | null, 
         )}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {busy && <p role="status" className="text-sm">{mode === 'generate' ? 'Generating your draft. This may take a minute.' : 'Saving your draft…'}</p>}
-        <Button type="submit" disabled={busy || !selected || (mode === 'generate' ? !cv.trim() || !selectedProvider || !account.data || missingCustomProfile : !subject.trim() || !emailFits(content))}>
+        <Button type="submit" disabled={busy || extracting || !selected || (mode === 'generate' ? !cvFits || !selectedProvider || !account.data || missingCustomProfile : !subject.trim() || !emailFits(content))}>
           {mode === 'generate' ? (busy ? 'Generating…' : 'Generate draft') : (busy ? 'Saving…' : 'Save draft')}
         </Button>
       </form>

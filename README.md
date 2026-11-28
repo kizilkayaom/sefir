@@ -7,13 +7,17 @@ The web app gives each account a private workspace, with a project landing page 
 ## How it works
 
 1. Add a contact and confirm its details.
-2. Choose a confirmed contact and either write an email or provide your résumé as plain text.
+2. Choose a confirmed contact and either write an email, paste your résumé text, or upload a PDF and review the extracted text.
 3. Write with the rich-text editor or choose Cohere, Anthropic, OpenAI, or OpenRouter to generate a starting draft. Edits save as new versions for review.
 4. Review the recipient, subject, body, and exact version.
 5. Approve sending. Temporal records approval and delivers through the existing Email MCP and outbox.
 6. Check workflow status, delivery results, or uncertain sends in the web app.
 
 Draft generation calls the model; sending requires a separate approval. Screenshot ingestion, retrieval, and reply tracking are later milestones. A sent state means Gmail accepted the message, not that it reached the recipient's inbox.
+
+Résumé uploads accept unencrypted PDFs with selectable text, up to 5 MiB and 20 pages. The PDF is processed without saving it; extracted text stays editable before generation. Extraction allows up to 100,000 UTF-8 bytes of text, 8 MiB per decoded content stream, and 32 MiB of combined page contents, with additional parsing-work limits and a 30-second timeout. Complex documents are rejected with an option to paste text instead.
+
+On Linux, including Docker, the extraction subprocess has a 512 MiB address-space limit. For native macOS development, the Go web server checks the subprocess's resident memory every 100 ms and stops it above 512 MiB; memory can briefly exceed that threshold between checks. The macOS monitor applies when extraction runs through the web server. Browser Back and Forward ask before discarding unsaved résumé or email edits, and cancelling navigation keeps an active extraction running.
 
 Start with [Docker Compose](#run-with-docker-compose), then configure [Google sign-in and Gmail](#google-sign-in-and-gmail). Instructions for [local development](#local-development) and [tests](#tests) are below.
 

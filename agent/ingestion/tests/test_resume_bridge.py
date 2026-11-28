@@ -1,26 +1,36 @@
 import json
 import os
+import resource
 import subprocess
 import sys
 import unittest
 from io import BytesIO, StringIO
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from test_resume import make_pdf
 
-from sefir_ingestion.resume import MAX_PDF_BYTES, ExtractedResume, ResumeExtractionError
-from sefir_ingestion.resume_bridge import main
+from sefir_ingestion.resume import (
+    MAX_PDF_BYTES,
+    PDF_COMPLEXITY_ERROR,
+    ExtractedResume,
+    ResumeExtractionError,
+)
+from sefir_ingestion.resume_bridge import MAX_PROCESS_BYTES, limit_process_memory, main
 
 
 class ResumeBridgeTests(unittest.TestCase):
-    def invoke(self, stream) -> tuple[int, dict, str]:
+    def invoke(self, stream, limit_error=None) -> tuple[int, dict, str]:
         stdout, stderr = StringIO(), StringIO()
         exit_code = 0
         with (
             patch("sys.stdin", SimpleNamespace(buffer=stream)),
             patch("sys.stdout", stdout),
             patch("sys.stderr", stderr),
+            patch(
+                "sefir_ingestion.resume_bridge.limit_process_memory",
+                side_effect=limit_error,
+            ),
         ):
             try:
                 main()
@@ -28,6 +38,93 @@ class ResumeBridgeTests(unittest.TestCase):
                 exit_code = exc.code
         self.assertEqual(len(stdout.getvalue().splitlines()), 1)
         return exit_code, json.loads(stdout.getvalue()), stderr.getvalue()
+
+    def test_linux_limits_do_not_raise_existing_memory_limits(self) -> None:
+        for previous, expected in (
+            ((resource.RLIM_INFINITY, resource.RLIM_INFINITY), MAX_PROCESS_BYTES),
+            ((MAX_PROCESS_BYTES * 2, resource.RLIM_INFINITY), MAX_PROCESS_BYTES),
+            ((MAX_PROCESS_BYTES // 2, MAX_PROCESS_BYTES), MAX_PROCESS_BYTES // 2),
+            ((resource.RLIM_INFINITY, MAX_PROCESS_BYTES // 2), MAX_PROCESS_BYTES // 2),
+        ):
+            with (
+                self.subTest(previous=previous),
+                patch("sys.platform", "linux"),
+                patch("resource.getrlimit", return_value=previous),
+                patch("resource.setrlimit") as set_limit,
+            ):
+                limit_process_memory()
+                self.assertEqual(
+                    set_limit.call_args_list,
+                    [
+                        call(resource.RLIMIT_CORE, (0, 0)),
+                        call(resource.RLIMIT_AS, (expected, expected)),
+                    ],
+                )
+
+    def test_macos_disables_core_dumps_without_using_unsupported_address_limit(
+        self,
+    ) -> None:
+        with patch("sys.platform", "darwin"), patch("resource.setrlimit") as set_limit:
+            limit_process_memory()
+        set_limit.assert_called_once_with(resource.RLIMIT_CORE, (0, 0))
+
+    def test_limit_setup_failure_does_not_read_or_parse_pdf(self) -> None:
+        stream = BytesIO(b"Fictional PDF bytes")
+        with patch("sefir_ingestion.resume_bridge.extract_resume_pdf") as extract:
+            code, result, stderr = self.invoke(
+                stream, OSError("private process details")
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            result,
+            {
+                "error": "extraction_failed",
+                "message": "Could not extract résumé text. Please try again.",
+            },
+        )
+        self.assertEqual(stderr, "")
+        self.assertEqual(stream.tell(), 0)
+        extract.assert_not_called()
+
+    def test_memory_exhaustion_returns_safe_validation_error(self) -> None:
+        with patch(
+            "sefir_ingestion.resume_bridge.extract_resume_pdf",
+            side_effect=MemoryError("private data"),
+        ):
+            code, result, stderr = self.invoke(BytesIO(b"Fictional PDF bytes"))
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            result, {"error": "invalid_pdf", "message": PDF_COMPLEXITY_ERROR}
+        )
+        self.assertEqual(stderr, "")
+
+    @unittest.skipUnless(
+        sys.platform == "linux", "Linux enforces the address-space limit"
+    )
+    def test_linux_rejects_allocation_above_process_limit(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "\n".join(
+                    [
+                        "from sefir_ingestion.resume_bridge import limit_process_memory, MAX_PROCESS_BYTES",
+                        "limit_process_memory()",
+                        "try:",
+                        "    data = bytearray(MAX_PROCESS_BYTES + 1)",
+                        "except MemoryError:",
+                        "    print('limited')",
+                    ]
+                ),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=15,
+            env={"PYTHON_DOTENV_DISABLED": "1", "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"limited\n")
+        self.assertEqual(result.stderr, b"")
 
     def run_module(self, data: bytes) -> subprocess.CompletedProcess:
         return subprocess.run(

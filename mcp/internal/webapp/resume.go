@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -64,9 +65,18 @@ func (e PythonResumeExtractor) Extract(ctx context.Context, data []byte) (Extrac
 		"PYTHONDONTWRITEBYTECODE=1",
 	}
 	command.WaitDelay = time.Second
-	err := command.Run()
+	var memoryUsage func(context.Context, int) (int64, error)
+	if runtime.GOOS == "darwin" {
+		memoryUsage = resumeResidentBytes
+	}
+	err := runResumeCommand(ctx, command, memoryUsage)
 	if ctx.Err() != nil {
 		return ExtractedResume{}, ctx.Err()
+	}
+	if errors.Is(err, errResumeMemoryLimit) {
+		return ExtractedResume{}, &ResumeValidationError{
+			Message: "This PDF is too complex to process. Upload a simpler PDF or paste your résumé text.",
+		}
 	}
 	if err != nil {
 		return ExtractedResume{}, errors.New("resume extraction failed")

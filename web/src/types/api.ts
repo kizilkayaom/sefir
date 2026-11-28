@@ -22,6 +22,11 @@ export type AccountStatus = {
   default_preset_id: string
 }
 
+export type ExtractedResume = {
+  text: string
+  page_count: number
+}
+
 export type WritingStyleProfile = {
   profile_id: string
   name: string

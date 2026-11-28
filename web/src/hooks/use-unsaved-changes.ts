@@ -1,8 +1,11 @@
 import { useEffect } from 'react'
 
+import { addNavigationGuard } from '@/lib/navigation'
+
 export function useUnsavedChanges(dirty: boolean, message = 'Discard your unsaved email changes?') {
   useEffect(() => {
     if (!dirty) return
+    const removeGuard = addNavigationGuard(() => window.confirm(message))
     const beforeUnload = (event: BeforeUnloadEvent) => event.preventDefault()
     const navigate = (event: MouseEvent) => {
       if (!(event.target instanceof Element)) return
@@ -17,6 +20,7 @@ export function useUnsavedChanges(dirty: boolean, message = 'Discard your unsave
     window.addEventListener('beforeunload', beforeUnload)
     document.addEventListener('click', navigate, true)
     return () => {
+      removeGuard()
       window.removeEventListener('beforeunload', beforeUnload)
       document.removeEventListener('click', navigate, true)
     }

@@ -60,6 +60,16 @@ const writingProfileFile = {
   buffer: Buffer.from(`---\nformat_version: 1\nname: Warm and direct\nlanguage: en\n---\n${uploadedWritingProfile.content}`),
 }
 
+const resumeFile = {
+  name: 'resume.PDF',
+  mimeType: 'application/pdf',
+  buffer: Buffer.from('%PDF-1.7\nFictional PDF bytes\x00\xff', 'latin1'),
+}
+const extractedResume = {
+  text: 'Fictional resume extracted from a PDF.\n\nGo and Python experience.',
+  page_count: 2,
+}
+
 async function mockAPI(page: Page) {
   const state = {
     authenticated: true,
@@ -107,6 +117,10 @@ async function mockAPI(page: Page) {
     generationRequests: [] as Record<string, string>[],
     generationError: false,
     generationWait: null as Promise<void> | null,
+    resumeUploads: [] as { name: string, bytes: number[] }[],
+    resumeResult: extractedResume as unknown,
+    resumeError: null as { status: number, error: string } | null,
+    resumeWait: null as Promise<void> | null,
     polishingRequests: [] as { path: string, input: Record<string, string> }[],
     polishingWait: null as Promise<void> | null,
     polishingError: false,
@@ -165,6 +179,20 @@ async function mockAPI(page: Page) {
     }
     if (state.expired || !state.authenticated) return reply({ error: 'Sign in to continue' }, 401)
     if (method !== 'GET') expect(request.headers()['x-csrf-token']).toBe('csrf-test')
+    if (path === '/api/resume/extract' && method === 'POST') {
+      const contentType = request.headers()['content-type']
+      expect(contentType).toMatch(/^multipart\/form-data; boundary=/)
+      const data = await new Response(request.postDataBuffer(), { headers: { 'Content-Type': contentType } }).formData()
+      expect([...data.keys()]).toEqual(['resume'])
+      const file = data.get('resume')
+      if (!(file instanceof File)) throw new Error('Expected a résumé file')
+      state.resumeUploads.push({ name: file.name, bytes: Array.from(new Uint8Array(await file.arrayBuffer())) })
+      const result = state.resumeResult
+      const error = state.resumeError
+      if (state.resumeWait) await state.resumeWait
+      if (error) return reply({ error: error.error }, error.status)
+      return reply(result)
+    }
     if (path === '/api/settings/account' && method === 'DELETE') {
       state.deletionRequests.push(request.postDataJSON())
       if (state.deletionWait) await state.deletionWait
@@ -515,6 +543,356 @@ test('contact changes and draft generation use the API', async ({ page }) => {
   expect(state.generationRequests[0].provider).toBe('cohere')
   expect(state.generationRequests[0].preset_id).toBe('prof')
   expect(state.approvalRequests).toHaveLength(0)
+})
+
+test('résumé PDF upload previews editable text and generates only after review', async ({ page }) => {
+  const state = await mockAPI(page)
+  await page.goto('/#new')
+  await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+  const file = page.getByLabel('Résumé PDF', { exact: true })
+  const text = page.getByLabel('Résumé text', { exact: true })
+  await expect(page.getByRole('button', { name: 'Extract résumé text', exact: true })).toBeDisabled()
+  await file.setInputFiles(resumeFile)
+  expect(state.resumeUploads).toHaveLength(0)
+  await page.getByRole('button', { name: 'Extract résumé text', exact: true }).click()
+  await expect(text).toHaveValue(extractedResume.text)
+  await expect(page.getByText('Extracted text from 2 pages. Review and edit it before generating a draft.', { exact: true })).toBeVisible()
+  expect(state.resumeUploads).toEqual([{ name: resumeFile.name, bytes: Array.from(resumeFile.buffer) }])
+  expect(state.generationRequests).toHaveLength(0)
+  expect(state.approvalRequests).toHaveLength(0)
+  await expect(file).toHaveValue('')
+  await expect(page.getByRole('button', { name: 'Replace résumé text', exact: true })).toBeDisabled()
+  const input = page.getByRole('region', { name: 'Résumé input', exact: true })
+  await input.screenshot({ path: test.info().outputPath('resume-input-desktop.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await expect(page.locator('html')).toHaveClass(/dark/)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await input.screenshot({ path: test.info().outputPath('resume-input-mobile-dark.png') })
+  const reviewed = 'Fictional resume reviewed and corrected before generation.'
+  await text.fill(reviewed)
+  await page.getByRole('button', { name: 'Generate draft', exact: true }).click()
+  await expect(page.getByRole('heading', { name: draft.subject, exact: true })).toBeVisible()
+  expect(state.generationRequests).toEqual([{
+    contact_id: contact.id, cv_text: reviewed, provider: 'cohere', preset_id: 'prof',
+  }])
+  expect(state.approvalRequests).toHaveLength(0)
+  await page.getByRole('link', { name: 'New draft', exact: true }).click()
+  await expect(text).toHaveValue('')
+  await expect(file).toHaveValue('')
+})
+
+test('résumé uploads preserve current text after failure and replace it on retry', async ({ page }) => {
+  const state = await mockAPI(page)
+  state.resumeError = { status: 422, error: 'No readable text found. Upload a PDF with selectable text or paste your résumé text.' }
+  await page.goto('/#new')
+  const text = page.getByLabel('Résumé text', { exact: true })
+  const file = page.getByLabel('Résumé PDF', { exact: true })
+  const original = 'Fictional resume entered manually.'
+  await text.fill(original)
+  await file.setInputFiles(resumeFile)
+  await expect(text).toHaveValue(original)
+  expect(state.resumeUploads).toHaveLength(0)
+  await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText(state.resumeError.error)
+  await expect(text).toHaveValue(original)
+  await expect(text).toBeEnabled()
+  await expect(file).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Replace résumé text', exact: true })).toBeEnabled()
+  state.resumeError = null
+  state.resumeResult = { text: 'Fictional resume from the replacement PDF.', page_count: 1 }
+  await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+  await expect(text).toHaveValue('Fictional resume from the replacement PDF.')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByText('Extracted text from 1 page. Review and edit it before generating a draft.', { exact: true })).toBeVisible()
+  await file.setInputFiles(resumeFile)
+  await expect(page.getByText(/Extracted text from/)).toHaveCount(0)
+  state.resumeResult = extractedResume
+  await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+  await expect(text).toHaveValue(extractedResume.text)
+  expect(state.resumeUploads).toHaveLength(3)
+  expect(state.generationRequests).toHaveLength(0)
+})
+
+test('résumé uploads reject invalid files locally and accept the exact file limit', async ({ page }) => {
+  const state = await mockAPI(page)
+  await page.goto('/#new')
+  const text = page.getByLabel('Résumé text', { exact: true })
+  const file = page.getByLabel('Résumé PDF', { exact: true })
+  const original = 'Fictional resume to preserve.'
+  await text.fill(original)
+  for (const item of [
+    { file: { ...resumeFile, name: 'resume.txt', mimeType: 'text/plain' }, error: 'Choose a PDF (.pdf) file.' },
+    { file: { ...resumeFile, buffer: Buffer.alloc(0) }, error: 'PDF file must not be empty.' },
+    { file: { ...resumeFile, buffer: Buffer.alloc(5 * 1024 * 1024 + 1, 'x') }, error: 'PDF file must not exceed 5 MiB.' },
+  ]) {
+    await file.setInputFiles(item.file)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+    await expect(page.getByRole('alert')).toHaveText(item.error)
+    await expect(text).toHaveValue(original)
+    expect(state.resumeUploads).toHaveLength(0)
+  }
+  await file.setInputFiles({ ...resumeFile, mimeType: '', buffer: Buffer.alloc(5 * 1024 * 1024, 'x') })
+  await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+  await expect(text).toHaveValue(extractedResume.text)
+  expect(state.resumeUploads).toHaveLength(1)
+  expect(state.resumeUploads[0].bytes.length).toBe(5 * 1024 * 1024)
+  expect(state.generationRequests).toHaveLength(0)
+})
+
+test('résumé extraction rejects invalid responses without overwriting edited text', async ({ page }) => {
+  const state = await mockAPI(page)
+  await page.goto('/#new')
+  const text = page.getByLabel('Résumé text', { exact: true })
+  const original = 'Fictional resume edited by the user.'
+  await text.fill(original)
+  await page.getByLabel('Résumé PDF', { exact: true }).setInputFiles(resumeFile)
+  for (const result of [
+    { page_count: 1 },
+    { text: '  \n ', page_count: 1 },
+    { text: 'é'.repeat(50001), page_count: 1 },
+    { text: 'Fictional resume', page_count: 21 },
+    { text: 'Fictional resume', page_count: '2' },
+  ]) {
+    state.resumeResult = result
+    await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+    await expect(page.getByRole('alert')).toHaveText('The server returned invalid résumé text. Please try again.')
+    await expect(text).toHaveValue(original)
+    await expect(page.getByRole('button', { name: 'Replace résumé text', exact: true })).toBeEnabled()
+  }
+  state.resumeResult = extractedResume
+  await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+  await expect(text).toHaveValue(extractedResume.text)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(state.resumeUploads).toHaveLength(6)
+  expect(state.generationRequests).toHaveLength(0)
+})
+
+test('résumé extraction prevents duplicate uploads, edits, mode changes, and generation while pending', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishExtraction!: () => void
+  state.resumeWait = new Promise<void>((resolve) => { finishExtraction = resolve })
+  await page.goto('/#new')
+  await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+  const text = page.getByLabel('Résumé text', { exact: true })
+  await text.fill('Fictional resume to preserve while waiting.')
+  const file = page.getByLabel('Résumé PDF', { exact: true })
+  await file.setInputFiles(resumeFile)
+  try {
+    await page.getByRole('button', { name: 'Replace résumé text', exact: true }).evaluate((button: HTMLButtonElement) => {
+      button.click()
+      button.click()
+    })
+    await expect.poll(() => state.resumeUploads.length).toBe(1)
+    await expect(page.getByText('Extracting résumé text…', { exact: true })).toBeVisible()
+    await expect(text).toHaveValue('Fictional resume to preserve while waiting.')
+    await expect(text).toBeDisabled()
+    await expect(file).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Extracting…', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Write yourself', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Generate with AI', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Generate draft', exact: true })).toBeDisabled()
+    await page.locator('form').dispatchEvent('submit')
+    expect(state.generationRequests).toHaveLength(0)
+    expect(state.resumeUploads).toHaveLength(1)
+  } finally {
+    state.resumeWait = null
+    finishExtraction()
+  }
+  await expect(text).toHaveValue(extractedResume.text)
+  await expect(text).toBeEnabled()
+  await expect(file).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Write yourself', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Generate draft', exact: true })).toBeEnabled()
+  let finishGeneration!: () => void
+  state.generationWait = new Promise<void>((resolve) => { finishGeneration = resolve })
+  await file.setInputFiles(resumeFile)
+  try {
+    await page.getByRole('button', { name: 'Generate draft', exact: true }).click()
+    await expect.poll(() => state.generationRequests.length).toBe(1)
+    await expect(file).toBeDisabled()
+    await expect(text).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Replace résumé text', exact: true })).toBeDisabled()
+    expect(state.resumeUploads).toHaveLength(1)
+  } finally {
+    state.generationWait = null
+    finishGeneration()
+  }
+  await expect(page.getByRole('heading', { name: draft.subject, exact: true })).toBeVisible()
+})
+
+test('résumé extraction warns before leaving, aborts on unmount, and ignores late results', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishExtraction!: () => void
+  state.resumeWait = new Promise<void>((resolve) => { finishExtraction = resolve })
+  await page.goto('/#new')
+  await page.getByLabel('Résumé PDF', { exact: true }).setInputFiles(resumeFile)
+  try {
+    await page.getByRole('button', { name: 'Extract résumé text', exact: true }).click()
+    await expect.poll(() => state.resumeUploads.length).toBe(1)
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toBe('Cancel résumé extraction and discard unsaved changes?')
+      await dialog.dismiss()
+    })
+    await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Extracting…', exact: true })).toBeVisible()
+    const aborted = page.waitForEvent('requestfailed', (request) => request.url().endsWith('/api/resume/extract'))
+    page.once('dialog', (dialog) => dialog.accept())
+    await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+    await aborted
+    await page.getByRole('link', { name: 'New draft', exact: true }).click()
+    await expect(page.getByLabel('Résumé text', { exact: true })).toHaveValue('')
+    state.resumeWait = null
+    state.resumeResult = { text: 'Fictional resume from a newer upload.', page_count: 1 }
+    await page.getByLabel('Résumé PDF', { exact: true }).setInputFiles(resumeFile)
+    await page.getByRole('button', { name: 'Extract résumé text', exact: true }).click()
+    await expect(page.getByLabel('Résumé text', { exact: true })).toHaveValue('Fictional resume from a newer upload.')
+  } finally {
+    state.resumeWait = null
+    finishExtraction()
+  }
+  await expect(page.getByRole('button', { name: 'Write yourself', exact: true })).toBeEnabled()
+  await expect(page.getByLabel('Résumé text', { exact: true })).toHaveValue('Fictional resume from a newer upload.')
+  expect(state.resumeUploads).toHaveLength(2)
+  expect(state.generationRequests).toHaveLength(0)
+})
+
+test('résumé edits survive cancelled Back, Forward, and multi-entry history navigation', async ({ page }) => {
+  await mockAPI(page)
+  await page.goto('/#drafts')
+  await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+  await page.getByRole('heading', { name: 'Contacts', exact: true }).waitFor()
+  await page.getByRole('link', { name: 'New draft', exact: true }).click()
+  await page.getByLabel('Résumé text', { exact: true }).waitFor()
+  await page.getByRole('link', { name: 'Activity', exact: true }).click()
+  await page.getByRole('heading', { name: 'Activity', exact: true }).waitFor()
+  await page.goBack()
+  const text = page.getByLabel('Résumé text', { exact: true })
+  await text.fill('Fictional resume with unsaved corrections.')
+  const historyLength = await page.evaluate(() => history.length)
+
+  for (const delta of [-1, 1, -2, -1]) {
+    let dismiss!: () => void
+    const dismissed = new Promise<void>((resolve) => { dismiss = resolve })
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toBe('Discard your unsaved résumé and email changes?')
+      await dialog.dismiss()
+      dismiss()
+    })
+    await page.evaluate((value) => history.go(value), delta)
+    await dismissed
+    await expect(page).toHaveURL(/#new$/)
+    await expect(text).toHaveValue('Fictional resume with unsaved corrections.')
+    expect(await page.evaluate(() => history.length)).toBe(historyLength)
+  }
+
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.goBack()
+  await expect(page.getByRole('heading', { name: 'Contacts', exact: true })).toBeVisible()
+  await page.goForward()
+  await expect(text).toHaveValue('')
+  await page.goForward()
+  await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible()
+})
+
+test('résumé extraction survives cancelled browser Back and aborts after confirmed Back', async ({ page }) => {
+  const state = await mockAPI(page)
+  let finishExtraction!: () => void
+  state.resumeWait = new Promise<void>((resolve) => { finishExtraction = resolve })
+  await page.goto('/#contacts')
+  await page.getByRole('link', { name: 'New draft', exact: true }).click()
+  await page.getByLabel('Résumé text', { exact: true }).fill('Fictional resume to preserve.')
+  await page.getByLabel('Résumé PDF', { exact: true }).setInputFiles(resumeFile)
+  try {
+    await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+    await expect.poll(() => state.resumeUploads.length).toBe(1)
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toBe('Cancel résumé extraction and discard unsaved changes?')
+      await dialog.dismiss()
+    })
+    await page.goBack()
+    await expect(page).toHaveURL(/#new$/)
+    await expect(page.getByLabel('Résumé text', { exact: true })).toHaveValue('Fictional resume to preserve.')
+    await expect(page.getByRole('button', { name: 'Extracting…', exact: true })).toBeVisible()
+    const aborted = page.waitForEvent('requestfailed', (request) => request.url().endsWith('/api/resume/extract'))
+    page.once('dialog', (dialog) => dialog.accept())
+    await page.goBack()
+    await aborted
+    await expect(page.getByRole('heading', { name: 'Contacts', exact: true })).toBeVisible()
+    await page.goForward()
+    await expect(page.getByLabel('Résumé text', { exact: true })).toHaveValue('')
+    await expect(page.getByRole('button', { name: 'Write yourself', exact: true })).toBeEnabled()
+  } finally {
+    state.resumeWait = null
+    finishExtraction()
+  }
+  expect(state.generationRequests).toHaveLength(0)
+})
+
+test('résumé text remains editable without uploading and is protected across mode changes and navigation', async ({ page }) => {
+  const state = await mockAPI(page)
+  await page.goto('/#new')
+  const text = page.getByLabel('Résumé text', { exact: true })
+  const original = 'Fictional resume entered without a PDF.'
+  await text.fill(original)
+  await page.getByRole('button', { name: 'Write yourself', exact: true }).click()
+  await expect(text).toHaveCount(0)
+  await expect(page.getByLabel('Résumé PDF', { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Generate with AI', exact: true }).click()
+  await expect(text).toHaveValue(original)
+  page.once('dialog', async (dialog) => {
+    expect(dialog.message()).toBe('Discard your unsaved résumé and email changes?')
+    await dialog.dismiss()
+  })
+  await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+  await expect(text).toHaveValue(original)
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.getByRole('link', { name: 'Contacts', exact: true }).click()
+  await expect(text).toHaveCount(0)
+  expect(state.resumeUploads).toHaveLength(0)
+  expect(state.generationRequests).toHaveLength(0)
+})
+
+test('résumé text enforces the UTF-8 byte limit in the button and submit handler', async ({ page }) => {
+  const state = await mockAPI(page)
+  await page.goto('/#new')
+  await page.getByLabel('Contact', { exact: true }).selectOption(contact.id)
+  const text = page.getByLabel('Résumé text', { exact: true })
+  const generate = page.getByRole('button', { name: 'Generate draft', exact: true })
+  const exact = 'Fictional resume' + 'é'.repeat(49992)
+  expect(Buffer.byteLength(exact)).toBe(100000)
+  await text.fill(exact + 'é')
+  await expect(page.getByRole('alert')).toHaveText('Keep résumé text within 100,000 bytes.')
+  await expect(text).toHaveAttribute('aria-invalid', 'true')
+  await expect(generate).toBeDisabled()
+  await page.locator('form').dispatchEvent('submit')
+  expect(state.generationRequests).toHaveLength(0)
+  await text.fill('   ')
+  await expect(generate).toBeDisabled()
+  await page.locator('form').dispatchEvent('submit')
+  expect(state.generationRequests).toHaveLength(0)
+  await text.fill(exact)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(text).toHaveAttribute('aria-invalid', 'false')
+  await expect(generate).toBeEnabled()
+  await generate.click()
+  await expect(page.getByRole('heading', { name: draft.subject, exact: true })).toBeVisible()
+  expect(state.generationRequests).toHaveLength(1)
+  expect(state.generationRequests[0].cv_text).toBe(exact)
+  expect(state.resumeUploads).toHaveLength(0)
+})
+
+test('résumé uploads return to sign in when the session expires', async ({ page }) => {
+  const state = await mockAPI(page)
+  await page.goto('/#new')
+  await page.getByLabel('Résumé text', { exact: true }).fill('Fictional resume that must leave the view on sign out.')
+  await page.getByLabel('Résumé PDF', { exact: true }).setInputFiles(resumeFile)
+  state.expired = true
+  await page.getByRole('button', { name: 'Replace résumé text', exact: true }).click()
+  await expect(page.getByLabel('Password', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Résumé text', { exact: true })).toHaveCount(0)
+  expect(state.generationRequests).toHaveLength(0)
 })
 
 test('draft generation uses the selected custom writing profile', async ({ page }) => {
