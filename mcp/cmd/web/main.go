@@ -69,6 +69,10 @@ func run() error {
 		Root:   root,
 		AI:     config.AI,
 	}
+	config.ResumeExtractor = webapp.PythonResumeExtractor{
+		Python: bridge.Python,
+		Root:   root,
+	}
 	if os.Getenv("DATABASE_URL") == "" {
 		return errors.New("DATABASE_URL is required")
 	}

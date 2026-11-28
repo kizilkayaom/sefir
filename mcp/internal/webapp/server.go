@@ -32,6 +32,7 @@ type Config struct {
 	GmailForAccount   func(string) (Gmail, error)
 	OperatorAccountID string
 	AI                *AIConfiguration
+	ResumeExtractor   ResumeExtractor
 }
 
 type Server struct {
@@ -45,6 +46,7 @@ type Server struct {
 	sessions       map[string]session
 	loginRate      *rate.Limiter
 	generating     chan struct{}
+	extracting     chan struct{}
 	googleAttempts map[string]googleAttempt
 	modelCatalogs  map[string]*aiModelCache
 }
@@ -84,6 +86,7 @@ func New(config Config, store Store, bridge Bridge, gmail Gmail) (*Server, error
 		sessions:       make(map[string]session),
 		loginRate:      rate.NewLimiter(rate.Every(10*time.Second), 5),
 		generating:     make(chan struct{}, 1),
+		extracting:     make(chan struct{}, 1),
 		googleAttempts: make(map[string]googleAttempt),
 		modelCatalogs:  map[string]*aiModelCache{"cohere": {}, "anthropic": {}, "openai": {}, "openrouter": {}},
 	}, nil
@@ -111,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/settings/ai/{provider}", s.protect(s.handleAIRemove))
 	mux.HandleFunc("POST /api/settings/account/google", s.protect(s.handleGoogleLink))
 	mux.HandleFunc("POST /api/logout", s.protect(s.handleLogout))
+	mux.HandleFunc("POST /api/resume/extract", s.protect(s.handleExtractResume))
 	mux.HandleFunc("GET /api/drafts", s.protect(s.handleDrafts))
 	mux.HandleFunc("POST /api/drafts", s.protect(s.handleGenerate))
 	mux.HandleFunc("POST /api/drafts/manual", s.protect(s.handleCompose))
